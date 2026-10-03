@@ -97,6 +97,38 @@ public sealed class AgentAppHostTests : IDisposable
         Assert.Null(new SettingsStore(paths.SettingsFile).Load().SelectedModelId);
     }
 
+    [Theory]
+    [InlineData("qwen3.8-flash-next-iq1m", true)]
+    [InlineData("qwen3.8-flash-next-q2kxl", false)]
+    public void A32GbStartupKeepsTheIq1MChoiceButStillClearsThe48GbQ2Choice(string id, bool keepChoice)
+    {
+        AgentPaths paths = Paths with { DeviceMemoryGB = 32, DeviceClass = DeviceClass.Desktop };
+        paths.EnsureCreated();
+        var settings = new SettingsStore(paths.SettingsFile);
+        AppSettings chosen = settings.Load();
+        chosen.SelectedModelId = id;
+        settings.Save(chosen);
+
+        // Only the small metadata shard is present. Startup must restore the IQ1_M
+        // choice and skip an incomplete download before any native model load occurs.
+        CatalogModel model = ModelCatalog.Find(id)!;
+        var store = new ModelStore(paths.ModelsDirectory);
+        Directory.CreateDirectory(store.DirectoryFor(model));
+        using (FileStream stream = File.Create(store.PathFor(model, model.Weights)))
+            stream.SetLength(model.Weights.Bytes);
+
+        _host = new AgentAppHost(paths);
+        _host.Start();
+
+        Assert.Contains(_host.Catalog, m => m.Id == "qwen3.8-flash-next-iq1m");
+        Assert.DoesNotContain(_host.Catalog, m => m.Id == "qwen3.8-flash-next-q2kxl");
+        Assert.Equal(AgentAppHost.ModelLoadState.None, _host.ModelLoad);
+        Assert.Equal(keepChoice ? id : null, new SettingsStore(paths.SettingsFile).Load().SelectedModelId);
+        Assert.Equal(InstallState.Partial, _host.Models.StateOf(model));
+        if (keepChoice)
+            Assert.Equal(store.PathFor(model, model.Weights), _host.Options.StartupModelPath);
+    }
+
     /// <summary>
     /// A remembered model the catalog no longer has is cleared, not merely skipped.
     ///
@@ -1432,6 +1464,24 @@ public sealed class AgentAppHostTests : IDisposable
         foreach (JsonElement model in body.GetProperty("models").EnumerateArray())
             Assert.True(model.GetProperty("minDeviceMemoryGB").GetInt32() <= 12,
                 $"{model.GetProperty("id").GetString()} needs more memory than the device tier allows");
+    }
+
+    [Fact]
+    public async Task The32GbCatalogApiOffersTheVisionIq1MEntryAndKeepsQ2Gated()
+    {
+        StartServing(Paths with { DeviceMemoryGB = 32, DeviceClass = DeviceClass.Desktop });
+        JsonElement body = await Get("/api/agent/catalog");
+        JsonElement[] models = body.GetProperty("models").EnumerateArray().ToArray();
+        JsonElement iq1m = Assert.Single(models, m => m.GetProperty("id").GetString() == "qwen3.8-flash-next-iq1m");
+        Assert.Equal(32, iq1m.GetProperty("minDeviceMemoryGB").GetInt32());
+        Assert.Equal("UD-IQ1_M", iq1m.GetProperty("quantization").GetString());
+        Assert.Equal("Image", iq1m.GetProperty("modalities").GetString());
+        Assert.True(iq1m.GetProperty("experimental").GetBoolean());
+        Assert.Equal(32768, iq1m.GetProperty("contextLength").GetInt32());
+        Assert.Equal(74_538_755_776, iq1m.GetProperty("totalBytes").GetInt64());
+        Assert.Equal("Qwen Community License 1.0", iq1m.GetProperty("license").GetString());
+        Assert.DoesNotContain(models, m => m.GetProperty("id").GetString() == "qwen3.8-flash-next-q2kxl");
+        Assert.Equal(AgentAppHost.ModelLoadState.None, _host!.ModelLoad);
     }
 
     [Fact]

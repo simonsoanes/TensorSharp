@@ -17,7 +17,7 @@ PLE n-gram 嵌入块、×4 hyper-connection 流以及 512 专家的 MoE。GGUF �
 最后的 mixer 以及 LM head——并配一个按形状索引的已捕获图缓存
 （span 放弃时改走逐层融合 kernel，后者再逐算子回退）。视觉沿用
 Qwen3.5-VL 塔，位置用 (T,H,W) IMRoPE；支持多图与多轮图像会话，并在轮次之间复用
-KV（GDN 递归无法回退，因此只有当新 prompt **恰好扩展**已缓存前缀时才复用；见[保留前缀复用](#保留前缀复用)）。在 radix 前缀缓存中，这种复用止于会话中第一个图像或视频 span：该系列尚未声明可跨媒体 span 复用（它保存了一段 M-RoPE 缓存间隙，目前还没有参照位置测试覆盖）。由于该系列只能从长度与匹配长度完全一致的 holder 或检查点续接，之后的轮次最多复用附件之前已存储的检查点（通常是系统提示词），其余部分重新 prefill。
+KV（GDN 递归无法回退，因此只有当新 prompt **恰好扩展**已缓存前缀时才复用；见[保留前缀复用](#保留前缀复用)）。radix 复用可以越过相同的图像或视频 span：完整状态保存 M-RoPE 缓存间隙与 QSA 位置历史，键同时校验媒体身份、span 边界与 token。结束的主缓存留在原处供下一轮精确续接；只有其他请求需要替换它时，才转换为保留 holder。
 
 思考模式可以开启或关闭。关闭时，助手轮次以已发布模板输出的闭合空块 `<think>\n\n</think>` 开头，重放历史时也保留这一确切后缀，因此缓存前缀仍能匹配。
 
@@ -142,6 +142,9 @@ MP4、WebM 或 MOV data URI（不会抓取远程 URL）：
 
 `Qwen4ExpModel.RetainedCache.cs` 为 `qwen4exp` 提供与 Qwen 3.5、DeepSeek V4 路径相同的保留 holder 复用：
 
+- 符合条件的已结束主缓存以**存活状态**登记在 radix 树中（`DeferPrimaryConversion`）。下一轮精确续接
+  直接使用同一缓存，不分配替代缓存；树中的标记不增加保留状态字节。只有其他请求需要替换主缓存时，
+  才尝试转换为 holder。转换被拒绝或失败时，新请求正常重新 prefill。
 - 结束的会话的整个逐序列 holder 会被**保留**，并为恰好扩展它的下一轮重新设键。什么都不移动：以该
   holder 为键的原生状态条目、它的已捕获图以及草稿头的私有 K/V 都留在原处。
 - 所有聊天共享的 prompt 结尾处的状态会被**检查点**为以主机为准的深拷贝（注意力 K/V、QSA 原始 key
@@ -149,20 +152,31 @@ MP4、WebM 或 MOV data URI（不会抓取远程 URL）：
   拒绝执行，而不是拷贝陈旧的主机种子。
 - 复用**仅限精确前缀**（`IExactFusedCacheReuse`）：新 prompt 没有逐 token 复现到最后一个的 holder
   不是它的延续，任何部分匹配都会重新 prefill。
-- 保留的会话与检查点共用一个预算 `TS_Q4E_RETAINED_CACHE_MB`（受实测内存余量限制；
-  `0` 或无法解析的值会拒绝所有保留）。未设置时，预算为实测余量的一半（与 Qwen 3.5 对空闲
-  holder 采用的规则相同），只有在无法测得余量时才使用 4096 MB。此前固定的 4096 MB 默认值在
-  4x A40 张量并行下只能容纳四个并发会话中的三个（1.6k token 时每个 holder 1318.6 MB，余量
-  15 GB），其中一个会话每一轮都要重新 prefill。radix 前缀缓存负责保留与驱逐，这个预算只会拒绝放不下的
-  holder（只报告一次）。
+- 精确复用可跨越相同媒体。holder 与检查点克隆保存 `MropeCacheGap`：分块结束后为
+  `KV length - 1 - last T`，后续标量 token 的旋转位置为 `KV index - gap`。它等于 Qwen 3.5
+  rotary delta 的负值，也保留视频偏移的符号。媒体内容、span 边界或会话 scope 改变时，不能使用该会话状态。
+- 额外的保留 holder 与检查点共用预算 `TS_Q4E_RETAINED_CACHE_MB`，受实测内存余量限制；
+  `0` 或无法解析的值拒绝这些额外状态，但不关闭现有存活主缓存的精确复用。未设置时，模型准入使用当前
+  实测余量的一半，无法测得余量时才使用 4096 MB。radix 树在引擎创建时按空余内存的一半确定默认设备/
+  状态上限，还按当前余量扣除运行请求的预留量检查；主缓存标记不作为额外 holder 再次计费。树负责驱逐，
+  模型拒绝放不下的 holder，树可以释放较旧的 scoped 状态后重试。
+- 主缓存转换先分配空替代缓存，再发布已移动的 holder。分配失败时，原有 KV 与递归状态保持完整，
+  不发布半成品 holder。
+- 替换前，树可测量主缓存转换后的 holder 大小，超过绝对配置或模型上限时直接拒绝；Qwen4Exp 也先检查
+  保留预算，避免无效的替代分配。分配后的准入仍重新检查内存余量。测量测试要求估算与实际转换大小相同，
+  并在不分配 tensor 的情况下拒绝无效长度与已借出的 holder。
 - 它需要完整的 GGML token-span 路径（每一份逐序列状态都驻留在设备上并以 holder 为键），以及原生
   条目可以精确拷贝的 GDN 状态布局。保留在按层切分下可用；检查点在按层切分下被接受，在张量并行下
   被拒绝。
 
 证据（合成 fixture，不代表训练模型的验收或性能）：
 `Qwen4ExpRetainedCacheTests` / `Qwen4ExpRetainedCachePolicyTests` 覆盖保留 A/B/A、检查点克隆、投机重绑定、
-预算驱逐、缺失状态拒绝以及 QSA 首次/重置增长，并在 CUDA 上覆盖真实双 GPU 按层切分的检查点生命周期。
-所有关卡在 CPU 上都逐位一致。在单卡 CUDA 上，一次 4 token 的目标验证与 4 次单 token 前向逐位相同
+预算拒绝后由 owner 释放、缺失状态拒绝以及 QSA 首次/重置增长。引擎测试比较精确图像续接与冷启动贪心输出，
+并要求媒体或 scope 改变时复用为零。分配失败测试确认原生续接状态不变且不发布 holder；
+`Qwen35MRopeReferencePositionTests` 还将 Qwen4Exp 分块位置、有符号 gap 与续接 decode 对照六组独立
+SGLang fixture。这些夹具覆盖 QSA/GDN/PLE/MTP 状态，不评估训练得到的视觉编码器。
+`DeferredPrimaryCacheTests` 覆盖无需替代分配的主缓存续接、实际替换、零额外保留预算与转换失败后的冷启动输出一致性。
+真实双 GPU 按层切分测试仍受设备条件限制，在此次单 GPU 运行中跳过。在单卡 CUDA 上，一次 4 token 的目标验证与 4 次单 token 前向逐位相同
 （`TeacherForcedTargetVerify_…`），以 2–4 为块提交的 32 个 teacher-forced token 在每一行上都与标量解码
 逐位相同（`RepeatedTargetBlocks_…`）——见 [验证行使用单 token kernel](#验证行使用单-token-kernel)。
 16 token 的 prefill 再接 4 个 token，在 CUDA 上与一次 20 token 的 prefill 并不逐位相同，因为 prefill 的
@@ -300,6 +314,88 @@ decode 落后 6%（21.1 对 22.55）。
 因此速度取决于这台 Mac 同时在做什么：其他工作让 5 GB 内存处于压缩状态时，同样的运行 decode 为
 10.3-11.3 tok/s。TensorAgent 在 48 GB 的 Mac 上提供这个文件
 （[应用内实测](../../TensorAgent/README.md#the-macs-own-models)）。
+
+单设备 `ggml_cuda` 也会按当前空闲显存、尚待绑定的浮点权重和缓存、驱动余量及 3 GiB 图工作区
+自动规划专家放置。显式 `--n-cpu-moe` / `--cpu-moe` 优先；张量并行和层切分仍使用显式配置。
+
+可选的 CUDA 专家缓存借鉴 Strata 的紧凑量化槽位：只把被路由的专家保留在设备缓冲区，
+使用 LRU 淘汰，保留全部选中专家和原有归约顺序。缓存保存原始 GGUF 字节，调用未修改的上游
+ggml kernel。进程启动前设置 `TS_HOST_MOE_EXPERT_CACHE_MB`；默认 `0` 继续使用原有主机路径：
+
+```powershell
+$env:TS_HOST_MOE_EXPERT_CACHE_MB = '4096'
+# 使用 --backend ggml_cuda 和通常的模型选项启动 CLI/server。
+```
+
+当自动规划无法放下全部专家、每一层均支持缓存且各层配额能容纳选中专家时，所有专家层都通过主机接缝
+使用紧凑槽位；否则继续保留能放下的末尾完整层。
+`TS_HOST_MOE_EXPERT_CACHE_LAYERS` 默认 48，按 Qwen3.8 的层数分配预算；小型合成模型需覆盖该值。
+缓存支持无偏置、gate/up/down 分别量化的 SiLU 专家以及 1 至 8 行输入。
+短 prefill 和目标验证块逐行重放同一标量图，保持 decode 数值和递归状态回滚。
+其他形状、后端、不足的预算或不支持的布局继续走原有路径；权重映射失效和模型释放会清空设备槽位。
+支持的接缝在 CUDA 缓冲区之间直接复制激活、路由权重和输出；主机 MoE 调试与 GPU 验证仍保留主机暂存接口。
+`TS_HOST_MOE_EXPERT_CACHE_OUTPUT_BRIDGE=0` 可恢复输出暂存，
+`TS_HOST_MOE_EXPERT_CACHE_BRIDGE=0` 可同时恢复输入与输出暂存。
+可选 `TS_HOST_MOE_EXPERT_CACHE_PREFETCH=1` 在上传前并行触碰选中未命中专家的原始字节页，
+不锁定或复制整份权重，仍允许操作系统淘汰这些页；冷/热负载测量前默认关闭。
+
+预算计入图分配和保守工作区余量；CUDA 共享池和驱动分配仍需额外空闲显存。
+已停用的 CUDA 捕获对象可能保留到上游空闲清理周期，因此该预留量并非进程总显存或卸载后立即释放的总量。
+`TS_HOST_MOE_EXPERT_CACHE_DIAGNOSTICS=1` 可输出槽位、命中、未命中和预留量。
+槽位分配还要求实际空闲显存超过原生安全余量；请求的预算过大时，部分层可能继续使用 CPU 回退。
+完整 logits A/B 检查见 `eng/validation/qwen4exp-expert-cache.py`，命令和计时范围见
+`eng/validation/Qwen4ExpExpertCacheProbe/README.md`。该功能保持显式开启：合成性能取决于缓存容量，
+这些夹具不能证明真实语言质量或与 Strata 的性能持平。
+
+2026-10-02 在 i7-11800H、32 GiB 内存、16 GiB 显存的 RTX 3080 Laptop GPU
+和 CUDA 12.6 上验证了真实 UD-IQ1_M 模型。三个分片均通过发布方 SHA-256 检查，
+Hugging Face revision 为 `38bb39ee97821de2c9009abb7e93950eec396e66`；推理使用 NVMe SSD 副本。
+TensorSharp 的 ggml `353b63b439f27ab2cc19dac97ab1681ba6d2d084` 保持未修改。
+Strata `36fa455e579b23a9c909c2c6fe1bddd9e51cb8ca` 使用其固定的 llama.cpp
+`3cf03257f219afbe7334045ff7c6a06ac68c627d`、原始 GGUF 专家、官方专家 profile
+和 8 GiB CPU 驻留预算。它将部分稠密投影转换为 BF16，因此不声明跨引擎 logits 逐位一致。
+
+独立语义检查覆盖整数计算、信息提取、Python 函数和 1 至 20 的平方列表。
+40 个独立进程均完整生成至 EOS，TensorSharp 与 Strata 的输出 token ID 全部一致。
+上下文为 512、F16 KV、关闭思考、标量贪心，不使用 MTP 或后缀草稿。
+Strata 的验证器容量设为二，但实际目标窗口均为一行且没有草稿。
+TensorSharp 的 8192/9472 MiB 缓存完整最终词表 logits 逐字节一致，
+并覆盖每个后续标量层；真实代码案例的自动 CUDA 规划也与显式主机放置一致。
+
+88-token 平方列表以四种引擎/预算各先运行一次，共四轮独立进程。
+下表为**中位数（范围）**；TensorSharp 使用 `TS_HOST_MOE_EXPERT_CACHE_MB=9472`
+（9.25 GiB 上限）。
+
+| 测量 | TensorSharp | Strata |
+|---|---:|---:|
+| 引擎报告的 decode tokens/s | 11.09（9.22–14.02） | 10.24（9.37–10.46） |
+| 完整进程秒数 | 16.54（14.95–19.31） | 62.15（59.76–66.89） |
+| 全设备采样显存峰值，MiB | 14832.5（14831–14842） | 15729（15719–15737） |
+| 操作系统工作集峰值，GiB | 19.74（19.66–19.82） | 18.51（18.48–18.53） |
+
+TensorSharp 统计首 token 之后的 87 次 forward，Strata 统计全部 88 次目标运行。
+Strata 的 TTFT 包含驻留专家初始化，TensorSharp 不包含模型构建。
+完整进程时间包含各引擎加载和输出序列化。未控制操作系统页缓存历史或时钟，
+因此这些结果不是冷存储或长期驻留服务的持平证明。所有 prompt 都超过八行，
+TensorSharp 使用原有 CPU 专家 prefill，不能把 prompt 耗时差归功于新缓存。
+短数学/提取案例的 decode 仍慢于 Strata，大缓存代码案例则更快。
+显存采样包含桌面且可能错过瞬时峰值；工作集包含映射页，平方案例中 TensorSharp
+主机工作集较高，因此不能声称每一级内存都更少。
+
+另一次 TensorSharp 热代码 A/B（一轮预热、三轮计时）中，直接输入/输出复制为
+27.92 tokens/s，仅直接输入为 23.29，完整暂存为 21.97。
+所有变体的完整输出 ID 和最终 logits 均一致。预取为 21.43，故继续默认关闭。
+该 A/B 不把热 TensorSharp 与新启动 Strata 作比较。CPU 卸载与 CUDA 最终 logits
+存在差异（代码案例相对 L2 为 0.09463），虽然 ID 相同，也不声明严格 CPU 数值持平或广泛语言质量。
+
+最终原生二进制（`66e50ad3…`）的 11 个原生测试全部通过且无跳过。
+Qwen/MoE 回归通过 CUDA 327 项（跳过 17）和 CPU 319 项（跳过 22）；修改的 Python 工具通过 49 项。
+缺少的目标/头部夹具、Metal、QSA 显式开启和不可用的多 GPU 场景不计入通过；
+真实 MTP 集成和 TP 类未执行。较广的历史验证脚本仍因 Windows/路径假设、缺失的九月证据
+及归档哈希不匹配而失败，未修改模块的失败另行记录。这些检查不能证明真实视觉、长上下文、
+困惑度、MTP 或多 GPU 的质量与性能。生成证据留在被忽略的
+`docs/validation/qwen38-strata-trained-audit/`、`qwen38-trained-transfer-ab-final/`
+及 `strata-qwen38/`；可复用工具和命令位于 `eng/validation/`。
 
 在 CUDA 上，GPU 放不下这个文件时，`--n-cpu-moe` 起同样的作用。在一张 A40（46 GB）上把 12 层的专家
 放在主机上，`ggml_cuda` 实测 600 / 30.2 tok/s（随机 token，pp512 / tg128），llama-bench 用

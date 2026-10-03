@@ -6,6 +6,9 @@
 
 [English](README.md) | [中文](README_zh-cn.md)
 
+<p align="center"><a href="https://buymeacoffee.com/zhongkaifu"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
+<sub>TensorSharp/TensorAgent is free. If you like it, a coffee keeps the work on it going.</sub></p>
+
 **Native .NET AI inference engine for GGUF models** — text, reasoning, multimodal input, embeddings, image generation and editing, and video with audio. Run it from the CLI, browser chat, Ollama/OpenAI-compatible APIs, or [TensorAgent](TensorAgent/README.md), the local app for iPhone, iPad, Mac and Windows. The .NET runtime offers managed CPU and native accelerator backends; published comparisons use identical GGUF files and hardware. The optional `TensorSharp.AgentHost` layer adds Agent Skills, a bounded, in-process model-to-tool loop for file and shell work, and bounded automatic subagent delegation.
 
 ## Highlights
@@ -15,7 +18,7 @@
 - **Text and code embeddings.** GGUF BERT/XLM-R encoders with OpenAI/Ollama batch embedding APIs for Snowflake Arctic Embed and MiniLM; see the [embedding guide](docs/embeddings.md).
 - **Measured performance.** TensorSharp is benchmarked against `llama.cpp` on identical models and hardware. Results are specific to the measured model, backend, and workload. See [Benchmarks](docs/benchmarks.md).
 - **Agentic work.** `TensorSharp.AgentHost` adds bounded Agent Skills, code tools, and [automatic subagent delegation](docs/multi_agent.md) with independent contexts, private workspaces, dependency scheduling, and read-only defaults.
-- **TensorAgent for phones and desktops.** One app for local chat, multimodal input, code and document work, image generation/editing, and short video with audio. Its eleven-model catalog is gated by device memory; image/video models need desktop memory tiers. The interface supports English, Simplified and Traditional Chinese, Japanese, Korean, Spanish, French and German. See [TensorAgent](TensorAgent/README.md) for source builds, platform differences and measured coverage.
+- **TensorAgent for phones and desktops.** One app for local chat, multimodal input, code and document work, image generation/editing, and short video with audio. Its twelve-model catalog is gated by system RAM tier; image/video generation models need desktop memory tiers. Qwen3.8 Flash Next offers experimental UD-IQ1_M with optional vision from 32 GB system RAM alongside text-only UD-Q2_K_XL from 48 GB. The interface supports English, Simplified and Traditional Chinese, Japanese, Korean, Spanish, French and German. See [TensorAgent](TensorAgent/README.md) for source builds, platform differences and measured coverage.
 - **Production-friendly building blocks.** Continuous batching and the paged, Radix prefix-shared KV cache are on by default; speculative decoding, tensor parallelism, and configurable security boundaries are available when you need them. See [Features](FEATURES.md), [Usage](USAGE.md), and the [current project status](docs/PROJECT_STATUS.md).
 
 ## Supported model families at a glance
@@ -155,7 +158,7 @@ Actively developed, and the source tree runs ahead of the published packages.
 | Backends | Pure C# CPU, direct CUDA/cuBLAS, MLX Metal, and GGML CPU/Metal/CUDA/Vulkan, with per-architecture exceptions. |
 | Serving features | Continuous batching with a shared prefix cache, speculative decoding, tensor parallelism, structured output, and tool calling. |
 | Agentic work | Agent Skills, sandboxed file and shell tools, and bounded sub-agents. See [Agent Skills](docs/agent_skills.md) and [Multiple agents](docs/multi_agent.md). |
-| TensorAgent | Eleven catalog entries, saved chats and artifacts, masked image edits and LoRA choices, eight interface languages, and persisted text-turn statistics. Media generation has been measured on a Mac; iOS media generation and Windows image/audio/video generation remain unverified. |
+| TensorAgent | Twelve catalog entries, saved chats and artifacts, masked image edits and LoRA choices, eight interface languages, and persisted text-turn statistics. Media generation has been measured on a Mac; iOS media generation and Windows image/audio/video generation remain unverified. |
 
 Per-area detail (which architecture runs on which backend, which features each family supports, and the known limits) is in the [status matrix](docs/PROJECT_STATUS.md#status-matrix).
 

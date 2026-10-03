@@ -9,5 +9,6 @@
   "about.control.body": "執行程式碼和存取網路是「設定」中的兩個獨立開關，預設均關閉，直到你主動開啟。程式碼只能在目前聊天的專用資料夾內執行；網路關閉時，助手執行的程式碼也無法聯網。",
   "about.builtOn.heading": "基於 TensorSharp 構建",
   "about.builtOn.body": "TensorAgent 基於 TensorSharp 構建。這是一個用於執行大語言模型和擴散模型的開源 .NET 引擎，提供用於 Apple GPU 的 Metal 後端。桌面端的 TensorSharp.Server 也使用同一引擎。",
+  "about.support.caption": "TensorSharp/TensorAgent 是免費的。如果你喜歡它，請我喝杯咖啡，支持我繼續開發。",
   "about.engine.unavailable": "無法獲取引擎詳情：{error}"
 }

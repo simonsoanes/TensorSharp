@@ -49,7 +49,7 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
             capabilities = capabilities with
             {
                 EndState = EndStateSupport.None, CanCaptureCopy = false,
-                AdoptPrimaryOnDisplacement = false, PagedEndStates = false,
+                AdoptPrimaryOnDisplacement = false, DeferPrimaryConversion = false, PagedEndStates = false,
             };
         _tree = new PrefixTree(new PrefixTreeOptions
         {
@@ -387,6 +387,11 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
             NodeFlags.None, GetSpans(sequence));
         if (node.EndState is not null) return false;
         string payloadKey = _tree.MintKey();
+        if (primary && _tree.Caps.DeferPrimaryConversion)
+        {
+            RegisterPrimary(node, payloadKey, length);
+            return false; // The live primary still belongs to the executor, not a retained holder.
+        }
         bool captured = RetentionEnabled && _tree.Caps.EndState != EndStateSupport.None
             && _cacheModel.TryCaptureDonate(sequence.RequestId, payloadKey, length, out _);
         if (!captured && RetentionEnabled && _tree.Caps.EndState != EndStateSupport.None
@@ -421,17 +426,21 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
             return false;
         }
         if (primary && _tree.Caps.PrimaryResident)
-        {
-            InvalidatePrimary();
-            _tree.AttachEndState(node, new EndStatePayload
-            {
-                Key = payloadKey, Kind = EndStateKind.PrimaryResident,
-                Footprint = new PayloadFootprint(length, length, default, 0),
-            });
-            _primaryKey = payloadKey;
-        }
+            RegisterPrimary(node, payloadKey, length);
         else _tree.CollectIfEmpty(node);
         return false;
+    }
+
+    private void RegisterPrimary(RadixNode node, string payloadKey, int length)
+    {
+        InvalidatePrimary();
+        var attached = _tree.AttachEndState(node, new EndStatePayload
+        {
+            Key = payloadKey, Kind = EndStateKind.PrimaryResident,
+            Footprint = new PayloadFootprint(length, length, default, 0),
+        });
+        if (attached is AttachResult.Attached or AttachResult.Revived) _primaryKey = payloadKey;
+        else _tree.CollectIfEmpty(node);
     }
 
     private bool Publish(RadixNode node, string key, PayloadFootprint footprint, int length, PayloadOrigin origin)
@@ -478,6 +487,61 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
         _tree.InvalidatePayload(_primaryKey);
         _primaryKey = null;
         RetireEmptyScopes();
+    }
+
+    /// <summary>Before execution overwrites an idle live primary, preserve it as a retained holder if
+    /// the family opted into deferred conversion. An exact continuation already claimed the primary
+    /// during admission and removed its marker, so this operation leaves that live state untouched.</summary>
+    internal bool DisplacePrimary()
+    {
+        Drain();
+        if (_primaryKey is null) return false;
+        string key = _primaryKey;
+        if (!_tree.Caps.DeferPrimaryConversion || !RetentionEnabled
+            || !_tree.Caps.AdoptPrimaryOnDisplacement || _tree.Caps.EndState == EndStateSupport.None
+            || !_tree.TryGetNodeByKey(key, out var node) || node.EndState?.Kind != EndStateKind.PrimaryResident)
+        {
+            InvalidatePrimary();
+            return false;
+        }
+        int length = node.EndState.Footprint.Tokens;
+        bool converted;
+        PayloadFootprint convertedFootprint;
+        try
+        {
+            if (_cacheModel.TryMeasurePrimaryEndState(length, out var footprint))
+                for (int i = 0; i < ResourceVector.ClassCount; i++)
+                {
+                    var cls = (ResourceClass)i;
+                    if (footprint.Bytes[cls] <= _tree.AbsoluteCap(cls)) continue;
+                    // Moving this holder would allocate a replacement, only for Trim to immediately
+                    // discard it. The live primary remains intact for the ordinary owner reset.
+                    InvalidatePrimary();
+                    return false;
+                }
+            converted = _cacheModel.TryConvertPrimary(key, length, out convertedFootprint);
+        }
+        catch (Exception ex)
+        {
+            // Retention is optional. Allocating a replacement primary must not turn a new request
+            // into a failed batch, and a conversion that threw may already have moved or freed state.
+            InvalidatePrimary();
+            _cacheModel.ReleasePayloads(new[] { key }, ReleaseReason.Invalidated);
+            _logger.LogWarning(ex, "Could not preserve the displaced primary cache; this request prefills normally.");
+            return true;
+        }
+        if (!converted)
+        {
+            // A refusal may have released the adopted primary. Its marker must disappear regardless
+            // of whether the family left the old state intact; this step is about to overwrite it.
+            InvalidatePrimary();
+            return _cacheModel is IPrefixCacheModelDiagnostics diagnostics && diagnostics.PrimaryCacheLength != length;
+        }
+        _tree.DetachEndState(node, ReleaseReason.Rollback, enqueue: false);
+        _primaryKey = null;
+        Publish(node, key, convertedFootprint, length, PayloadOrigin.PrimaryConversion);
+        Trim();
+        return true;
     }
 
     internal void ReleaseRequest(SequenceState sequence)

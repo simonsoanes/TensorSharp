@@ -302,6 +302,7 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_mamba2.cpp
     ggml_ops_moe.cpp
     ggml_ops_host_moe_decode.cpp
+    ggml_ops_host_moe_cache.cpp
     ggml_ops_deepseek4.cpp
     ggml_ops_deepseek41_tp.cpp
     ggml_ops_deepseek41_vision.cpp
@@ -583,6 +584,41 @@ if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
         target_link_libraries(GgmlOpsCudaSchedulerAllocTest PRIVATE ggml-cuda ggml-cpu ggml-base CUDA::cudart)
         add_test(NAME cuda-scheduler-allocation-failure-recovery COMMAND GgmlOpsCudaSchedulerAllocTest)
         set_tests_properties(cuda-scheduler-allocation-failure-recovery
+            PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+    endif()
+
+    add_executable(GgmlOpsHostMoeExpertCacheTest
+        tests/host_moe_expert_cache_test.cpp ggml_ops_host_moe_cache.cpp)
+    target_include_directories(GgmlOpsHostMoeExpertCacheTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml/src")
+    target_link_libraries(GgmlOpsHostMoeExpertCacheTest PRIVATE ggml-cpu ggml-base)
+    add_test(NAME host-moe-expert-cache-cpu-fallback COMMAND GgmlOpsHostMoeExpertCacheTest --cpu)
+    add_test(NAME host-moe-expert-cache-invalid-budget-sign
+        COMMAND GgmlOpsHostMoeExpertCacheTest --invalid-budget "+8192")
+    add_test(NAME host-moe-expert-cache-invalid-budget-leading-space
+        COMMAND GgmlOpsHostMoeExpertCacheTest --invalid-budget " 8192")
+    add_test(NAME host-moe-expert-cache-invalid-budget-trailing-space
+        COMMAND GgmlOpsHostMoeExpertCacheTest --invalid-budget "8192 ")
+    add_test(NAME host-moe-expert-cache-invalid-budget-overflow
+        COMMAND GgmlOpsHostMoeExpertCacheTest --invalid-budget "18446744073709551616")
+    if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
+        target_compile_definitions(GgmlOpsHostMoeExpertCacheTest PRIVATE TSG_GGML_USE_CUDA=1)
+        target_link_libraries(GgmlOpsHostMoeExpertCacheTest PRIVATE ggml-cuda)
+        add_test(NAME host-moe-expert-cache-cuda-parity COMMAND GgmlOpsHostMoeExpertCacheTest)
+        add_test(NAME host-moe-expert-cache-cuda-iq1-m-parity
+            COMMAND GgmlOpsHostMoeExpertCacheTest --quantization iq1_m)
+        add_test(NAME host-moe-expert-cache-cuda-iq2-xxs-parity
+            COMMAND GgmlOpsHostMoeExpertCacheTest --quantization iq2_xxs)
+        add_test(NAME host-moe-expert-cache-cuda-prefetch-parity
+            COMMAND GgmlOpsHostMoeExpertCacheTest --prefetch)
+        add_test(NAME host-moe-expert-cache-cuda-iq1-m-prefetch-parity
+            COMMAND GgmlOpsHostMoeExpertCacheTest --quantization iq1_m --prefetch)
+        add_test(NAME host-moe-expert-cache-cuda-iq2-xxs-prefetch-parity
+            COMMAND GgmlOpsHostMoeExpertCacheTest --quantization iq2_xxs --prefetch)
+        set_tests_properties(host-moe-expert-cache-cuda-parity
+            host-moe-expert-cache-cuda-iq1-m-parity host-moe-expert-cache-cuda-iq2-xxs-parity
+            host-moe-expert-cache-cuda-prefetch-parity host-moe-expert-cache-cuda-iq1-m-prefetch-parity
+            host-moe-expert-cache-cuda-iq2-xxs-prefetch-parity
             PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
     endif()
 

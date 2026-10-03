@@ -26,8 +26,11 @@ public sealed record PrefixCacheCapabilities
     // End states
     public EndStateSupport EndState { get; init; }
     public bool CanCaptureCopy { get; init; }                        // deep copy of the ACTIVE cache (P, breakpoints, branches)
-    public bool AdoptPrimaryOnDisplacement { get; init; }            // PrimaryResident → EndState at zero copy
+    public bool AdoptPrimaryOnDisplacement { get; init; }            // move primary K/V into an end state; may allocate a fresh primary
     public bool PrimaryResident { get; init; }                       // the primary may be registered at finish
+    /// <summary>Keep a finished primary in place for an exact next turn. Convert it to an owned
+    /// end state only when another request displaces it, so a continuation needs no replacement cache.</summary>
+    public bool DeferPrimaryConversion { get; init; }
     public int MinRetainTokens { get; init; } = 32;                  // DEC-18
     /// <summary>End states of the batched route: a finished batched sequence's pool blocks stay with the
     /// prefix cache and the model keeps only its own per-sequence state (Nemotron-H's Mamba2 slot); donated

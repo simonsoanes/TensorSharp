@@ -6,6 +6,9 @@
 
 [English](README.md) | [中文](README_zh-cn.md)
 
+<p align="center"><a href="https://buymeacoffee.com/zhongkaifu"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
+<sub>TensorSharp/TensorAgent is free. If you like it, a coffee keeps the work on it going.</sub></p>
+
 **面向 GGUF 模型的原生 .NET AI 推理引擎** —— 支持文本、推理、多模态输入、嵌入、图像生成与编辑，以及带音频的视频生成。可通过 CLI、浏览器聊天、兼容 Ollama/OpenAI 的 API，或运行在 iPhone、iPad、Mac 和 Windows 上的本地应用 [TensorAgent](TensorAgent/README.md) 使用。.NET 运行时提供纯托管 CPU 与原生加速后端；已发布的对比使用相同 GGUF 文件和硬件。可选的 `TensorSharp.AgentHost` 层还提供 Agent Skills、用于文件和 shell 操作的有界进程内“模型→工具”循环，以及有界的自动子智能体委派。
 
 ## 亮点功能
@@ -15,7 +18,7 @@
 - **文本与代码嵌入。** GGUF BERT/XLM-R 编码器，兼容 OpenAI/Ollama 的批量嵌入 API，支持 Snowflake Arctic Embed 与 MiniLM；见[嵌入指南](docs/embeddings_zh-cn.md)。
 - **性能经过实测。** TensorSharp 在相同模型与硬件上对比 `llama.cpp`；结果对应所测的模型、后端与工作负载。详见[性能数据](docs/benchmarks_zh-cn.md)。
 - **智能体工作。** `TensorSharp.AgentHost` 提供有界的 Agent Skills、代码工具与[自动子智能体委派](docs/multi_agent.md)（英文），子智能体拥有独立上下文、私有工作区、依赖调度，并默认只读。
-- **手机与桌面上的 TensorAgent。** 同一个应用支持本地聊天、多模态输入、代码与文档工作、图像生成与编辑，以及带音频的短视频。内置十一项模型，按设备内存限制加载；图像和视频模型需要较高内存档位。界面支持英语、简体中文、繁体中文、日语、韩语、西班牙语、法语和德语。源码构建、平台差异及实际验证范围见 [TensorAgent](TensorAgent/README.md)。
+- **手机与桌面上的 TensorAgent。** 同一个应用支持本地聊天、多模态输入、代码与文档工作、图像生成与编辑，以及带音频的短视频。内置十二项模型，按系统内存档位限制加载；图像和视频生成模型需要较高内存档位。Qwen3.8 Flash Next 提供实验性的 UD-IQ1_M（32 GB 系统内存起，可选视觉投影器）以及仅支持文本的 UD-Q2_K_XL（48 GB 起）。界面支持英语、简体中文、繁体中文、日语、韩语、西班牙语、法语和德语。源码构建、平台差异及实际验证范围见 [TensorAgent](TensorAgent/README.md)。
 - **可扩展的工程能力。** 连续批处理与分页、Radix 前缀共享 KV 缓存默认开启；投机解码、张量并行和可配置的安全边界按需启用。详见[功能说明](FEATURES_zh-cn.md)、[使用指南](USAGE_zh-cn.md)与[当前状态](docs/PROJECT_STATUS_zh-cn.md)。
 
 ## 支持的模型家族一览
@@ -155,7 +158,7 @@ TensorSharp 与 `llama.cpp` 在同一块 NVIDIA RTX 3080 Laptop GPU（16 GB）�
 | 后端 | 纯 C# CPU、Direct CUDA/cuBLAS、MLX Metal，以及 GGML CPU/Metal/CUDA/Vulkan，各架构另有例外。 |
 | 服务能力 | 带共享前缀缓存的连续批处理、投机解码、张量并行、结构化输出与工具调用。 |
 | 智能体能力 | Agent Skills、沙箱化的文件与 shell 工具，以及有界的子智能体。见 [Agent Skills](docs/agent_skills.md)（英文）与[多智能体](docs/multi_agent.md)（英文）。 |
-| TensorAgent | 十一项内置模型、保存聊天与产物、蒙版图像编辑和 LoRA 选择、八种界面语言，以及持久保存的文本轮次统计。媒体生成已在 Mac 上实测；iOS 媒体生成及 Windows 图像 / 音频 / 视频生成仍未验证。 |
+| TensorAgent | 十二项内置模型、保存聊天与产物、蒙版图像编辑和 LoRA 选择、八种界面语言，以及持久保存的文本轮次统计。媒体生成已在 Mac 上实测；iOS 媒体生成及 Windows 图像 / 音频 / 视频生成仍未验证。 |
 
 逐项细节（哪个架构跑在哪个后端上、各家族分别支持哪些特性，以及已知限制）见[状态矩阵](docs/PROJECT_STATUS_zh-cn.md#状态矩阵)。
 

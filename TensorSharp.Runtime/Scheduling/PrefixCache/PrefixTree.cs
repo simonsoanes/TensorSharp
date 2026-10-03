@@ -1475,15 +1475,22 @@ internal sealed class PrefixTree
     /// </summary>
     internal long EffectiveCap(ResourceClass cls)
     {
-        long cap = long.MaxValue;
-        if (cls == ResourceClass.PoolPages)
-            return _options.PoolPagesCap > 0 ? _options.PoolPagesCap : long.MaxValue;
-        if (_optionCap[cls] > 0) cap = Math.Min(cap, _optionCap[cls]);
-        long sub = Caps.SubCapBytes[cls];
-        if (sub > 0) cap = Math.Min(cap, sub);
+        long cap = AbsoluteCap(cls);
+        if (cls == ResourceClass.PoolPages) return cap;
         long spare = _options.QuerySpareBytes?.Invoke(cls) ?? -1;
         if (spare >= 0) cap = Math.Min(cap, _cached[cls] + Math.Max(0, spare - _runningReserve[cls]));
         return cap;
+    }
+
+    /// <summary>The option and family bounds, independent of current cached bytes and spare.
+    /// A single payload above these bounds cannot survive publication even after evicting all others.</summary>
+    internal long AbsoluteCap(ResourceClass cls)
+    {
+        if (cls == ResourceClass.PoolPages)
+            return _options.PoolPagesCap > 0 ? _options.PoolPagesCap : long.MaxValue;
+        long cap = _optionCap[cls] > 0 ? _optionCap[cls] : long.MaxValue;
+        long sub = Caps.SubCapBytes[cls];
+        return sub > 0 ? Math.Min(cap, sub) : cap;
     }
 
     private static readonly ResourceClass[] s_byteClasses =

@@ -9,5 +9,6 @@
   "about.control.body": "La ejecución de código y el acceso a la red se controlan con dos opciones independientes en Ajustes, ambas desactivadas hasta que las actives. El código se limita a la carpeta del chat actual y, cuando la red está desactivada, también lo está para el código del asistente.",
   "about.builtOn.heading": "Creado con TensorSharp",
   "about.builtOn.body": "TensorAgent está basado en TensorSharp, un motor .NET de código abierto para ejecutar grandes modelos de lenguaje y difusión, con un backend Metal para las GPU de Apple. Es el mismo motor que utiliza TensorSharp.Server en el escritorio.",
+  "about.support.caption": "TensorSharp/TensorAgent es gratis. Si te gusta, un café ayuda a seguir desarrollándolo.",
   "about.engine.unavailable": "Detalles del motor no disponibles: {error}"
 }

@@ -130,9 +130,9 @@ public sealed record CatalogModel
     public required string Quantization { get => CatalogText.Read(_quantization); init => _quantization = value; }
     public required IReadOnlyList<CatalogFile> Files { get; init; }
     public required CatalogModalities Modalities { get; init; }
-    /// <summary>Smallest device memory class this entry is offered on. Weights are wired by
-    /// Metal, so resident memory is roughly the GGUF size plus KV cache, the F32 projector
-    /// and compute buffers; the class keeps a model that cannot fit off the picker.</summary>
+    /// <summary>Smallest system RAM class this entry is offered on, independent of OS.
+    /// The tier allows for resident weights, KV cache, optional companions and compute
+    /// buffers; accelerator placement and disk paging depend on the backend and device.</summary>
     public required int MinDeviceMemoryGB { get; init; }
     /// <summary>Context length the app configures (MAX_CONTEXT); bounds the KV cache.</summary>
     public required int ContextLength { get; init; }
@@ -144,7 +144,7 @@ public sealed record CatalogModel
     /// <see cref="Hosting.EngineMemoryPolicy"/>): caches that start small and grow, at most a
     /// little of the reply reserved ahead, one finished conversation kept, nothing parked.
     /// The engine's desktop defaults are written for a machine with memory to spare; for a
-    /// model whose weights take most of a Mac's memory there is none, and they are what
+    /// model whose weights take most of a device's memory there is none, and they are what
     /// fills it.
     /// </summary>
     public bool LeanCaches { get; init; }
@@ -158,8 +158,8 @@ public sealed record CatalogModel
     /// them to the engine.
     /// </summary>
     public bool SideloadOnly { get; init; }
-    /// <summary>Marked in the UI: fits only with reduced context or has not been validated on
-    /// a phone yet.</summary>
+    /// <summary>Marked in the UI: requires a constrained memory budget or has limited
+    /// device/backend validation. See the entry's notes for its tested configuration.</summary>
     public bool Experimental { get; init; }
     public string? Notes { get => CatalogText.Read(_notes); init => _notes = value; }
     public required string License { get => CatalogText.Read(_license); init => _license = value; }
@@ -168,7 +168,7 @@ public sealed record CatalogModel
     /// resident: zero for every entry whose weights a token reads in full. Qwen3.8 Flash Next
     /// declares its n-gram table (a token reads 16 of its 320 M rows) and the routed experts
     /// the engine offloads on the entry's smallest device (a token reads 10 of each layer's
-    /// 512), which is what lets a 79 GB file run on a 48 GB Mac. The residency checks hold
+    /// 512), which lets its files exceed system RAM. The residency checks hold
     /// <see cref="ResidentWeightsBytes"/> to the device instead of the whole file.
     /// </summary>
     public long WeightsPagedFromDiskBytes { get; init; }

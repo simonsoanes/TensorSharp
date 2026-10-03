@@ -182,19 +182,31 @@ public static class HolderPrefixCacheAdapter
         if (model is IPrefixCacheModelDiagnostics diagnostics && diagnostics.PrimaryCacheLength != length) return false;
         model.AdoptPrimaryCacheToFused(payloadKey);
         if (!model.HasFusedSequenceCache(payloadKey)) return false;   // a holder was checked out: nothing adopted
-        if (!model.RetainSequenceCacheAs(payloadKey, payloadKey))
+        try
         {
-            model.OnSequenceReleased(payloadKey);
-            return false;
+            if (!model.RetainSequenceCacheAs(payloadKey, payloadKey))
+            {
+                model.OnSequenceReleased(payloadKey);
+                return false;
+            }
+            PayloadFootprint converted = model.MeasureEndState(payloadKey);
+            if (converted.Tokens != length)
+            {
+                model.DiscardRetainedCaches(new[] { payloadKey }, ReleaseReason.Invalidated);
+                return false;
+            }
+            footprint = converted;
+            return true;
         }
-        PayloadFootprint converted = model.MeasureEndState(payloadKey);
-        if (converted.Tokens != length)
+        catch
         {
-            model.DiscardRetainedCaches(new[] { payloadKey }, ReleaseReason.Invalidated);
-            return false;
+            // Adoption already transferred ownership. Retention can throw before or after moving
+            // the private holder into its retained dictionary; try both releases without masking
+            // the original failure, which the coordinator handles by recomputing the new request.
+            try { model.OnSequenceReleased(payloadKey); } catch { }
+            try { model.DiscardRetainedCaches(new[] { payloadKey }, ReleaseReason.Invalidated); } catch { }
+            throw;
         }
-        footprint = converted;
-        return true;
     }
 }
 

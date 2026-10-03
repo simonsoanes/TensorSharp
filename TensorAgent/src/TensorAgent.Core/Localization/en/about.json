@@ -9,5 +9,6 @@
   "about.control.body": "Running code and reaching the network are separate switches in Settings, both off until you turn them on. Code runs confined to the current chat's own folder, and when the network is off it is off for the assistant's code too.",
   "about.builtOn.heading": "Built on TensorSharp",
   "about.builtOn.body": "TensorAgent is built on TensorSharp, an open-source .NET engine for running large language and diffusion models, with a Metal backend for Apple GPUs. It is the same engine that powers TensorSharp.Server on the desktop.",
+  "about.support.caption": "TensorSharp/TensorAgent is free. If you like it, a coffee keeps the work on it going.",
   "about.engine.unavailable": "Engine details unavailable: {error}"
 }

@@ -261,7 +261,15 @@ namespace TensorSharp.Runtime.Scheduling
                 if (RadixCache != null)
                 {
                     RadixCache.Drain();
-                    RadixCache.InvalidatePrimary();
+                    if (RadixCache.DisplacePrimary())
+                    {
+                        _liveCacheValid = false;
+                        _liveCacheSeq = null;
+                        _liveCacheLen = 0;
+                        _currentOwner = null;
+                        _ownerTokensInModel = 0;
+                        _ownerForwardedTokens = 0;
+                    }
                     foreach (var work in output.ScheduledWork)
                         _fusedSeqById[work.Sequence.RequestId] = work.Sequence;
                 }

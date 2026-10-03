@@ -8,6 +8,8 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 #include "ggml_ops_internal.h"
+#include "ggml_ops_attention_precision.h"
+#include "ggml_ops_dsv4_fused.h"
 #include <chrono>   // TS_VISION_PROF per-block timing
 
 using namespace tsg;
@@ -1280,8 +1282,11 @@ ggml_tensor* build_vision_attention(
     ggml_context* ctx,
     ggml_tensor* q_perm, ggml_tensor* k_perm, ggml_tensor* v_3d,
     int rows, int num_heads, int head_dim, float attn_scale,
-    bool kv_f16)
+    bool kv_f16, bool owned_vision_f32 = false)
 {
+    if (owned_vision_f32)
+        return tsg_vision_attention_f32(ctx, q_perm, k_perm,
+            ggml_permute(ctx, v_3d, 0, 2, 1, 3), attn_scale);
     if (g_backend_type != BACKEND_TYPE_CUDA && g_backend_type != BACKEND_TYPE_VULKAN)
     {
         ggml_tensor* v_perm = ggml_permute(ctx, v_3d, 0, 2, 1, 3); // [hd, rows, heads]
@@ -1314,7 +1319,14 @@ ggml_tensor* build_vision_attention(
     if (chunk < 256) chunk = 256;
     if (chunk > rows) chunk = rows;
 
-    ggml_tensor* out = nullptr; // [hd, rows-so-far, heads]
+    // Write each query tile into one output allocation, in graph order. Chained
+    // concatenation copied every preceding tile again at each step and held
+    // those growing outputs live alongside attention scratch. The writes have
+    // the same F32 results and retain the dependency chain required for gallocr
+    // to reuse the score buffer between tiles.
+    const bool ordered_writes = g_backend_type == BACKEND_TYPE_CUDA;
+    ggml_tensor* out = ordered_writes
+        ? ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, rows, num_heads) : nullptr;
     for (int64_t start = 0; start < rows; start += chunk)
     {
         const int64_t len = std::min<int64_t>(chunk, rows - start);
@@ -1336,7 +1348,10 @@ ggml_tensor* build_vision_attention(
         ggml_prec_set_acc(scores, GGML_PREC_F32);
         ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, nullptr, attn_scale, 0.0f);
         ggml_tensor* out_c = ggml_mul_mat(ctx, vt, probs);    // [hd, len, heads]
-        out = out == nullptr ? out_c : ggml_concat(ctx, out, out_c, 1);
+        if (ordered_writes)
+            out = ggml_set_inplace(ctx, out, out_c, out->nb[1], out->nb[2], out->nb[3],
+                static_cast<std::size_t>(start) * out->nb[1]);
+        else out = out == nullptr ? out_c : ggml_concat(ctx, out, out_c, 1);
     }
 
     return ggml_permute(ctx, out, 0, 2, 1, 3); // [hd, heads, rows]
@@ -1350,7 +1365,7 @@ static ggml_tensor* build_vision_attn_subgraph(
     ggml_tensor* out_w_t, ggml_tensor* out_b_t,
     ggml_tensor* cos_t, ggml_tensor* sin_t,
     int rows, int hidden, int num_heads, int head_dim, int half_dim,
-    float attn_scale)
+    float attn_scale, bool owned_vision_f32 = false)
 {
     const int triple_hidden = 3 * hidden;
     ggml_tensor* inp = ggml_cont(ctx, cur);
@@ -1406,7 +1421,7 @@ static ggml_tensor* build_vision_attn_subgraph(
     // repo, so they keep the F32 K/V they were validated with. See the note on
     // build_vision_attention for what enabling it is worth and what proves it safe.
     ggml_tensor* attn_out = build_vision_attention(ctx, q_perm, k_perm, v_3d,
-        rows, num_heads, head_dim, attn_scale, /*kv_f16=*/ false);
+        rows, num_heads, head_dim, attn_scale, /*kv_f16=*/ false, owned_vision_f32);
     ggml_tensor* attn_flat = ggml_reshape_2d(ctx, ggml_cont(ctx, attn_out), hidden, rows);
 
     ggml_tensor* out_proj = ggml_mul_mat(ctx, out_w_t, attn_flat);
@@ -3116,6 +3131,28 @@ static int fused_qwen35_vision_encoder_f32_impl(
     if (!validate_desc(hidden_desc, "hidden")) return 0;
     if (block_count <= 0 || block_count > 128) { set_last_error("vision_encoder: bad block_count"); return 0; }
 
+    // The paired backend runs owned kernels and upstream nodes in order on the
+    // same CUDA stream. It owns no model weights or activation buffers, and is
+    // destroyed only after compute_graph has drained the encoder. Other towers
+    // and the per-block fallback retain their existing graph and numerics.
+    ggml_backend_t compute_backend = g_backend;
+    struct OwnedBackend {
+        ggml_backend_t value = nullptr;
+        ~OwnedBackend() { if (value) ggml_backend_free(value); }
+    } owned_backend;
+    bool owned_vision_f32 = false;
+#ifdef TSG_GGML_USE_CUDA
+    const char * owned_env = std::getenv("TS_QWEN_VISION_F32");
+    if (g_backend_type == BACKEND_TYPE_CUDA && head_dim == 72 &&
+        owned_env != nullptr && std::atoi(owned_env) != 0) {
+        owned_backend.value = tsg_dsv4_fused_backend_init(g_backend);
+        if (owned_backend.value) {
+            compute_backend = owned_backend.value;
+            owned_vision_f32 = true;
+        }
+    }
+#endif
+
     const int rows = hidden_desc.dim0;     // numPatches
     const int hidden = hidden_desc.dim1;   // hiddenSize
     const int dff = up_ne1;                // intermediate_size
@@ -3215,7 +3252,7 @@ static int fused_qwen35_vision_encoder_f32_impl(
 
         cur = build_vision_attn_subgraph(ctx, cur, ln1w_t, ln1b_t, eps,
             qkvw_t, qkvb_t, outw_t, outb_t, cos_t, sin_t,
-            rows, hidden, num_heads, head_dim, half_dim, attn_scale);
+            rows, hidden, num_heads, head_dim, half_dim, attn_scale, owned_vision_f32);
         cur = build_vision_mlp_subgraph(ctx, cur, ln2w_t, ln2b_t, eps,
             upw_t, upb_t, downw_t, downb_t, rows, hidden, dff, gelu_erf);
     }
@@ -3246,7 +3283,7 @@ static int fused_qwen35_vision_encoder_f32_impl(
     ggml_backend_tensor_set(cos_t, cos_table, 0, cos_sin_elems * sizeof(float));
     ggml_backend_tensor_set(sin_t, sin_table, 0, cos_sin_elems * sizeof(float));
 
-    ggml_status status = tsg::compute_graph(g_backend, graph);
+    ggml_status status = tsg::compute_graph(compute_backend, graph);
     if (status != GGML_STATUS_SUCCESS) { ggml_gallocr_free(galloc); set_last_error("vision_encoder: graph compute failed."); return 0; }
     finalize_compute(use_zero_copy, hidden_binding.storage, hidden_desc.data, hidden_binding.raw_bytes);
 

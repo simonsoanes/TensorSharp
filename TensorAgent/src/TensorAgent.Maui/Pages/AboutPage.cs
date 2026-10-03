@@ -33,7 +33,7 @@ public sealed class AboutPage : ContentPage
         BackgroundColor = Theme.Background;
         Build();
 
-        // Nothing here but text, so a new language builds the page again.
+        // Rebuild the page's text when the language changes.
         Loc.Changed += () => Dispatcher.Dispatch(() =>
         {
             try
@@ -112,6 +112,33 @@ public sealed class AboutPage : ContentPage
             }),
         });
         stack.Add(link);
+
+        var coffee = new Image
+        {
+            Source = ImageSource.FromUri(new Uri("https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png")),
+            HeightRequest = 50,
+            Aspect = Aspect.AspectFit,
+            HorizontalOptions = LayoutOptions.Center,
+        };
+        SemanticProperties.SetDescription(coffee, "Buy Me A Coffee");
+        coffee.GestureRecognizers.Add(new TapGestureRecognizer
+        {
+            Command = new Command(async () =>
+            {
+                try { await Launcher.OpenAsync("https://buymeacoffee.com/zhongkaifu"); }
+                catch (Exception ex) { Console.WriteLine("TensorAgent: coffee link failed: " + ex.Message); }
+            }),
+        });
+        stack.Add(coffee);
+        stack.Add(new Label
+        {
+            Text = Loc.T("about.support.caption"),
+            FontSize = 12,
+            TextColor = Theme.Muted,
+            HorizontalTextAlignment = TextAlignment.Center,
+            LineBreakMode = LineBreakMode.WordWrap,
+            Margin = new Thickness(0, 8, 0, 20),
+        });
 
         stack.Add(new Label
         {

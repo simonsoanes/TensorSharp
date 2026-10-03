@@ -571,7 +571,7 @@ namespace
     // offloaded experts, 30 s of a 1818-token prefill whose GPU work took 1 s.
     // Faulted in concurrently first, the copy reads from the page cache. Nothing
     // is pinned or copied here; the pages stay evictable.
-    void prefetch_mapped_ranges(const std::uint8_t* base,
+    void prefetch_mapped_ranges_impl(const std::uint8_t* base,
                                 const std::vector<std::pair<std::size_t, std::size_t>>& ranges)
     {
         static tsg_dsv41::engram_io_pool s_pool(16);
@@ -1742,6 +1742,12 @@ namespace
 
 namespace tsg
 {
+    void prefetch_mapped_ranges(const std::uint8_t* base,
+        const std::vector<std::pair<std::size_t, std::size_t>>& ranges)
+    {
+        prefetch_mapped_ranges_impl(base, ranges);
+    }
+
     // Host-side routed-expert FFN, shared by the standalone MoE op (when the
     // caller passes run_on_cpu) and by the whole-model decode graphs' CPU
     // offload segments. Declared in ggml_ops_internal.h; see there for the
@@ -1838,6 +1844,8 @@ namespace tsg
 
     void moe_ffn_host_release()
     {
+        // Cached CUDA graphs must retire before the backend and mapped weights.
+        host_moe_expert_cache_release();
         // Give the locked expert pages back first: a model reload maps a new
         // GGUF, and leaving the previous one pinned would charge its bytes to
         // the pin budget forever.
@@ -1925,8 +1933,9 @@ namespace tsg
     }
 
     bool host_moe_compute_segment(const HostMoeSegment& hm, std::vector<float>& out, const char* kernel_name,
-                                  HostMoeStagedInputs* staged, bool allow_device_stream)
+                                  HostMoeStagedInputs* staged, bool allow_device_stream, bool* output_on_device)
     {
+        if (output_on_device != nullptr) *output_on_device = false;
         if (hm.moe_in == nullptr || hm.sel_ids == nullptr ||
             hm.weights == nullptr || hm.moe_out == nullptr)
         {
@@ -1949,8 +1958,36 @@ namespace tsg
 
         // The caller synchronized the segment that produced these, so the reads
         // see its results.
-        ggml_backend_tensor_get(hm.moe_in, s_moe_in.data(), 0, act_count * sizeof(float));
         ggml_backend_tensor_get(hm.sel_ids, s_ids.data(), 0, route_count * sizeof(std::int32_t));
+
+        // CUDA compact slots can keep activations and routing probabilities on
+        // the device. The host only needs IDs for slot selection; retain staged
+        // reads when diagnostics request them and when the cache declines.
+        static const bool s_cache_device_inputs = [] {
+            const char* e = std::getenv("TS_HOST_MOE_EXPERT_CACHE_BRIDGE");
+            return e == nullptr || e[0] != '0';
+        }();
+        if (allow_device_stream && staged == nullptr && s_cache_device_inputs)
+        {
+            static const bool s_cache_device_outputs = [] {
+                const char* e = std::getenv("TS_HOST_MOE_EXPERT_CACHE_OUTPUT_BRIDGE");
+                return e == nullptr || e[0] != '0';
+            }();
+            if (output_on_device != nullptr && s_cache_device_outputs)
+            {
+                const int cached = host_moe_cached_experts(hm, nullptr, s_ids.data(),
+                    nullptr, nullptr, kernel_name);
+                if (cached != 0)
+                {
+                    *output_on_device = cached > 0;
+                    return cached > 0;
+                }
+            }
+            const int cached = host_moe_cached_experts(hm, nullptr, s_ids.data(),
+                nullptr, out.data(), kernel_name);
+            if (cached != 0) return cached > 0;
+        }
+        ggml_backend_tensor_get(hm.moe_in, s_moe_in.data(), 0, act_count * sizeof(float));
         ggml_backend_tensor_get(hm.weights, s_weights.data(), 0, route_count * sizeof(float));
 
         if (staged != nullptr)
@@ -1960,6 +1997,10 @@ namespace tsg
             staged->weights = s_weights.data();
         }
 
+        const int cached = allow_device_stream ? host_moe_cached_experts(hm, s_moe_in.data(), s_ids.data(),
+            s_weights.data(), out.data(), kernel_name) : 0;
+        if (cached != 0)
+            return cached > 0;
         if (host_moe_decode_experts(hm, s_moe_in.data(), s_ids.data(), s_weights.data(), out.data()))
             return true;
 
@@ -2083,8 +2124,11 @@ namespace tsg
             // (The verify chain wants the host result to compare against, so it
             // keeps the staged path.)
             HostMoeStagedInputs staged;
+            bool output_on_device = false;
             const auto t_host = s_pass_timing ? pass_clock::now() : pass_clock::time_point{};
-            if (!host_moe_compute_segment(hm, s_moe_out, kernel_name, &staged))
+            if (!host_moe_compute_segment(hm, s_moe_out, kernel_name,
+                                          debug_this_call ? &staged : nullptr, true,
+                                          !debug_this_call && hm.verify_gpu == nullptr ? &output_on_device : nullptr))
                 return false;
             if (s_pass_timing) s_acc_host += ms_since(t_host);
 
@@ -2119,7 +2163,7 @@ namespace tsg
             }
 
             const auto t_up = s_pass_timing ? pass_clock::now() : pass_clock::time_point{};
-            host_moe_upload_segment(hm, s_moe_out.data());
+            if (!output_on_device) host_moe_upload_segment(hm, s_moe_out.data());
             if (s_pass_timing) s_acc_up += ms_since(t_up);
 
             if (debug_this_call)

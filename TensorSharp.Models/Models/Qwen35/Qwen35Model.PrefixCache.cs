@@ -41,6 +41,7 @@ namespace TensorSharp.Models
                 // False under tensor parallelism (the cache lives on the ranks).
                 CanCaptureCopy = holders && SupportsPrefixCheckpoints,
                 AdoptPrimaryOnDisplacement = holders,
+                DeferPrimaryConversion = holders,
                 PrimaryResident = true,
                 MinRetainTokens = 32,
                 Truncation = TruncationKind.None,
@@ -60,6 +61,18 @@ namespace TensorSharp.Models
         public long QuerySpareBytes(ResourceClass cls) => QueryPrefixCacheSpareBytes(cls);
 
         // ---------------------------------------------------------------- end states
+
+        /// <summary>The bytes adopting the current primary would publish, without
+        /// allocating a replacement, settling native state or changing ownership.</summary>
+        public bool TryMeasurePrimaryEndState(int length, out PayloadFootprint footprint)
+        {
+            footprint = default;
+            if (_activeFusedKey != null || _kvCacheK == null || _kvCacheV == null
+                || length <= 0 || _cacheSeqLen != length || length > _kvCacheCapacity)
+                return false;
+            footprint = MeasureHolderFootprint(SnapshotActiveCache());
+            return true;
+        }
 
         public bool TryConvertPrimary(string payloadKey, int length, out PayloadFootprint footprint)
         {
@@ -116,6 +129,11 @@ namespace TensorSharp.Models
         public PayloadFootprint MeasureEndState(string payloadKey)
         {
             if (!TryGetRetained(payloadKey, out var holder)) return default;
+            return MeasureHolderFootprint(holder);
+        }
+
+        private static PayloadFootprint MeasureHolderFootprint(Qwen35KvCacheHolder holder)
+        {
             MeasureHolder(holder, out long kvBytes, out long stateBytes, out long deviceBytes);
             var vector = new ResourceVector
             {

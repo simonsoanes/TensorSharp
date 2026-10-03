@@ -17,6 +17,13 @@ extern "C" ggml_tensor * tsg_attention_f32(ggml_context *, ggml_tensor * q, ggml
 extern "C" ggml_tensor * tsg_attention_f32_sparse(ggml_context *, ggml_tensor * q, ggml_tensor * k,
     ggml_tensor * v, ggml_tensor * mask, ggml_tensor * sinks, float scale, int capacity);
 
+// Full bidirectional F32 vision attention for 72-wide heads, without masks or
+// head/batch broadcasting. Q/K/V [72,N,H,B], output [72,H,N,B]. CUDA shares K/V
+// tiles across queries and never allocates the quadratic attention matrix.
+// The CPU callback is an independent double-precision reference.
+extern "C" ggml_tensor * tsg_vision_attention_f32(ggml_context *, ggml_tensor * q,
+    ggml_tensor * k, ggml_tensor * v, float scale);
+
 // Place the complete owned subgraph, including the shared in-place output
 // allocation, on one scheduler backend. Existing input producers keep their
 // placement and the scheduler transfers their required views normally.

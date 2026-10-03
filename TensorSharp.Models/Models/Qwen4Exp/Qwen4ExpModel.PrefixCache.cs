@@ -32,13 +32,15 @@ namespace TensorSharp.Models
                 EndState = holders ? EndStateSupport.CopyAndDonate : EndStateSupport.None,
                 CanCaptureCopy = holders && SupportsPrefixCheckpoints,
                 AdoptPrimaryOnDisplacement = holders,
+                DeferPrimaryConversion = holders,
                 PrimaryResident = true,
                 MinRetainTokens = 32,
                 Truncation = TruncationKind.None,            // exact length only (IExactFusedCacheReuse)
                 TruncationGranularity = Math.Max(1, KVCacheTruncationGranularity),
                 Pages = PageSupport.None,
-                // It stores an M-RoPE cache gap; no reference-position test exists yet (§15.2 Q6).
-                ReuseAcrossMediaSpan = false,
+                // Complete holders preserve the rotary gap and QSA position history,
+                // so identical media can be continued at the exact retained length.
+                ReuseAcrossMediaSpan = SupportsReuseAcrossMediaSpan,
                 Persistable = false,
                 // Unset, the tree's own half-spare cap bounds holders (0 = no sub-cap), as it does Qwen 3.5's.
                 SubCapBytes = new ResourceVector
@@ -60,10 +62,31 @@ namespace TensorSharp.Models
 
         // ---------------------------------------------------------------- end states
 
+        /// <summary>The complete live primary's eventual holder footprint, without
+        /// allocating a replacement or downloading its authoritative native state.</summary>
+        public bool TryMeasurePrimaryEndState(int length, out PayloadFootprint footprint)
+        {
+            footprint = default;
+            if (_activeFusedKey != null || _kCache == null || _vCache == null
+                || !CompleteSpanPathAvailable || _headKDim != _headVDim
+                || _specStateFailed || length <= 0 || _cacheSeqLen != length || length > _kvCacheCapacity)
+                return false;
+            footprint = MeasureHolderFootprint(SnapshotActiveCache());
+            return true;
+        }
+
         public bool TryConvertPrimary(string payloadKey, int length, out PayloadFootprint footprint)
         {
             footprint = default;
-            return SupportsRetainedFusedCache && SupportsPerSequenceFusedForward
+            if (!SupportsPerSequenceFusedForward || string.IsNullOrEmpty(payloadKey)
+                || HasFusedSequenceCache(payloadKey) || !TryMeasurePrimaryEndState(length, out var measured))
+                return false;
+            // Adoption needs an empty replacement cache. Do not allocate it when
+            // the existing live state already cannot fit the retention budget.
+            // RetainSequenceCacheAs rechecks after allocation because headroom
+            // can shrink and the prefix cache remains responsible for eviction.
+            long retainedBytes = checked(measured.Bytes.HostKv + measured.Bytes.StateSnapshot);
+            return EnsureRetentionBudget(retainedBytes, "converting live primary " + payloadKey)
                 && HolderPrefixCacheAdapter.TryConvertPrimary(this, payloadKey, length, out footprint);
         }
 
@@ -77,6 +100,11 @@ namespace TensorSharp.Models
         public PayloadFootprint MeasureEndState(string payloadKey)
         {
             if (!TryGetRetained(payloadKey, out var holder)) return default;
+            return MeasureHolderFootprint(holder);
+        }
+
+        private PayloadFootprint MeasureHolderFootprint(Qwen4ExpKvCacheHolder holder)
+        {
             long total = RetainedHolderBytes(holder);
             long kv = KvStorageBytes(holder, scaleToCapacity: -1);
             var vector = new ResourceVector

@@ -141,6 +141,27 @@ public sealed class HolderPrefixCacheAdapterTests
     }
 
     [Fact]
+    public void ConversionRetentionException_ReleasesAdoptedOwnership_AndPreservesTheOriginalException()
+    {
+        foreach (bool published in new[] { false, true })
+        foreach (bool releaseThrows in new[] { false, true })
+        {
+            using var model = new AdaptedOracleModel(OracleFakes.R());
+            model.Forward(Enumerable.Range(1, 20).ToArray());
+            var expected = new OutOfMemoryException("retained dictionary allocation failed");
+            model.RetainFailure = expected;
+            model.RetainFailureAfterPublication = published;
+            if (releaseThrows) model.ReleaseFailure = new InvalidOperationException("secondary cleanup failure");
+
+            Assert.Same(expected, Assert.Throws<OutOfMemoryException>(() =>
+                model.TryConvertPrimary("pc:1:1", 20, out _)));
+            Assert.Equal(0, model.PrivateHolderCount);
+            Assert.Empty(model.RetainedPayloadKeys);
+            Assert.False(model.HasFusedSequenceCache("pc:1:1"));
+        }
+    }
+
+    [Fact]
     public void Materialize_RevalidatesWithCanMaterialize()
     {
         var model = new AdaptedOracleModel(OracleFakes.R());

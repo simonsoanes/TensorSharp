@@ -18,6 +18,7 @@ public sealed class CatalogTests
             "qwen3.8-27b-q4kxl",
             "muse-glimmer-30b-q4kxl",
             "qwen3.8-flash-next-q2kxl",
+            "qwen3.8-flash-next-iq1m",
             "qwen-image-2.1-q4km",
             "minimax-h3-fl2va-q4k",
             "minimax-h3-ref2va-q4k",
@@ -214,6 +215,7 @@ public sealed class CatalogTests
         "qwen3.8-27b-q4kxl",
         "muse-glimmer-30b-q4kxl",
         "qwen3.8-flash-next-q2kxl",
+        "qwen3.8-flash-next-iq1m",
         "qwen-image-2.1-q4km",
         "minimax-h3-fl2va-q4k",
         "minimax-h3-ref2va-q4k",
@@ -245,6 +247,7 @@ public sealed class CatalogTests
     [InlineData("minimax-h3-fl2va-q4k", 32)]
     [InlineData("minimax-h3-ref2va-q4k", 32)]
     [InlineData("qwen3.8-flash-next-q2kxl", 48)]
+    [InlineData("qwen3.8-flash-next-iq1m", 32)]
     public void TheDesktopTiersHoldTheModelsNoPhoneCanRunWell(string id, int tier)
     {
         CatalogModel model = Assert.IsType<CatalogModel>(ModelCatalog.Find(id));
@@ -267,14 +270,20 @@ public sealed class CatalogTests
     [Fact]
     public void OnlyADesktopMixtureOfExpertsDeclaresWeightsPagedFromDisk()
     {
+        var approved = new Dictionary<string, int>
+        {
+            ["qwen3.8-flash-next-q2kxl"] = 48,
+            ["qwen3.8-flash-next-iq1m"] = 32,
+        };
         foreach (CatalogModel m in ModelCatalog.BuiltIn.Where(m => m.WeightsPagedFromDiskBytes != 0))
         {
             Assert.Equal(CatalogArchitectureKind.MixtureOfExperts, m.Kind);
-            Assert.True(m.MinDeviceMemoryGB >= 48, $"{m.Id} pages weights from disk on a {m.MinDeviceMemoryGB} GB device");
+            Assert.True(approved.TryGetValue(m.Id, out int tier), $"{m.Id} has no approved paging tier");
+            Assert.Equal(tier, m.MinDeviceMemoryGB);
             Assert.InRange(m.WeightsPagedFromDiskBytes, 1, m.WeightsBytes - 1);
         }
-        Assert.Equal(new[] { "qwen3.8-flash-next-q2kxl" },
-            ModelCatalog.BuiltIn.Where(m => m.WeightsPagedFromDiskBytes != 0).Select(m => m.Id));
+        Assert.Equal(approved.Keys.OrderBy(id => id),
+            ModelCatalog.BuiltIn.Where(m => m.WeightsPagedFromDiskBytes != 0).Select(m => m.Id).OrderBy(id => id));
     }
 
     /// <summary>The residency checks read every shard: a split file that declares nothing paged
@@ -323,13 +332,26 @@ public sealed class CatalogTests
         ["qwen3.8-flash-next-q2kxl"] = (18.34, 7.31, "chat-e2e.py's text scenarios in the Mac app, phys_footprint_peak"),
     };
 
+    // IQ1_M's 32 GB tier was validated on Windows with 16 GB CUDA VRAM and SSD paging.
+    // It has no measured Mac footprint; do not present the Windows evidence as Mac data.
+    private static readonly string[] ValidatedOnWindowsOnly = { "qwen3.8-flash-next-iq1m" };
+
+    [Fact]
+    public void DesktopValidationScopesCoverEachEntryWithoutInventingMacMeasurements()
+    {
+        Assert.Empty(MeasuredOnAMac.Keys.Intersect(ValidatedOnWindowsOnly));
+        Assert.Equal(DesktopOnly.OrderBy(id => id),
+            MeasuredOnAMac.Keys.Concat(ValidatedOnWindowsOnly).OrderBy(id => id));
+        Assert.All(ValidatedOnWindowsOnly, id => Assert.True(ModelCatalog.Find(id)!.Experimental));
+    }
+
     /// <summary>What macOS and the rest of a desktop keep for themselves.</summary>
     private const double MacOsGB = 5.0;
 
     [Fact]
     public void EachDesktopEntryFitsItsTierBesideMacOS()
     {
-        Assert.Equal(DesktopOnly.OrderBy(id => id), MeasuredOnAMac.Keys.OrderBy(id => id));
+        Assert.Equal(DesktopOnly.Except(ValidatedOnWindowsOnly).OrderBy(id => id), MeasuredOnAMac.Keys.OrderBy(id => id));
         int[] tiers = { 6, 8, 12, 16, 24, 32, 48 };
         foreach ((string id, (double files, double footprint, string how)) in MeasuredOnAMac)
         {
@@ -551,6 +573,7 @@ public sealed class CatalogTests
         "minimax-h3-fl2va-q4k",
         "minimax-h3-ref2va-q4k",
         "qwen3.8-flash-next-q2kxl",
+        "qwen3.8-flash-next-iq1m",
     };
 
     /// <summary>
