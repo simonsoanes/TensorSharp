@@ -12,6 +12,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
+using TensorAgent.Core.Localization;
 
 namespace TensorAgent.Core.Downloads;
 
@@ -30,7 +31,8 @@ public readonly record struct DownloadProgress(long BytesReceived, long? TotalBy
 
 /// <summary>Thrown when the bytes on disk do not match the catalog's SHA-256.</summary>
 public sealed class DownloadIntegrityException(string path, string expected, string actual)
-    : IOException($"'{Path.GetFileName(path)}' failed verification: expected SHA-256 {expected}, got {actual}. The file was deleted; download it again.")
+    : IOException(Loc.T("host.download.verificationFailed",
+        ("file", Path.GetFileName(path)), ("expected", expected), ("actual", actual)))
 {
     public string ExpectedSha256 { get; } = expected;
     public string ActualSha256 { get; } = actual;
@@ -142,7 +144,8 @@ public sealed class ResumableDownloader
             }
         }
 
-        throw new IOException($"Download of {url} failed after {_maxAttempts} attempts: {last?.Message}", last);
+        throw new IOException(Loc.T("host.download.failedAfterAttempts",
+            ("url", url), ("attempts", _maxAttempts), ("reason", last?.Message)), last);
     }
 
     private async Task TransferAsync(
@@ -193,7 +196,7 @@ public sealed class ResumableDownloader
                 return;
             }
             File.Delete(part);
-            throw new IOException("partial file no longer matches the remote; restarting");
+            throw new IOException(Loc.T("host.download.partialMismatch"));
         }
         response.EnsureSuccessStatusCode();
 
@@ -203,7 +206,9 @@ public sealed class ResumableDownloader
         if (response.Content.Headers.ContentLength is long contentLength && expectedBytes is not null
             && offset + contentLength != expectedBytes)
         {
-            throw new IOException($"remote reports {offset + contentLength:N0} bytes but the catalog expects {expectedBytes:N0}");
+            throw new IOException(Loc.T("host.download.sizeMismatch",
+                ("reported", (offset + contentLength).ToString("N0", Loc.Culture)),
+                ("expected", expectedBytes.Value.ToString("N0", Loc.Culture))));
         }
 
         await using (var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false))
@@ -237,7 +242,9 @@ public sealed class ResumableDownloader
             progress?.Report(new DownloadProgress(received, total, rate, "downloading"));
 
             if (expectedBytes is not null && received != expectedBytes)
-                throw new IOException($"connection closed after {received:N0} of {expectedBytes:N0} bytes");
+                throw new IOException(Loc.T("host.download.connectionClosed",
+                    ("received", received.ToString("N0", Loc.Culture)),
+                    ("expected", expectedBytes.Value.ToString("N0", Loc.Culture))));
         }
 
         if (hash is not null)

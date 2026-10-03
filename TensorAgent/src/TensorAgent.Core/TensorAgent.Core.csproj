@@ -14,6 +14,12 @@
          Server's page stays unforked. Embedded rather than copied to disk because the
          script and the routes it calls have to ship as one thing. -->
     <EmbeddedResource Include="WebUi\tensoragent.js" />
+    <!-- The interface's strings, one directory per language (Localization/<tag>/<area>.json),
+         read by Loc under "TensorAgent.Core.Localization.<tag>/" and served to the page with
+         the runtime that reads them as /i18n.js (PageStrings). -->
+    <EmbeddedResource Include="WebUi\i18n.js" />
+    <EmbeddedResource Include="Localization\**\*.json"
+                      LogicalName="TensorAgent.Core.Localization.%(RecursiveDir)%(Filename)%(Extension)" />
     <EmbeddedResource Include="..\..\..\TensorSharp.Chat\WebUi\mask-editor.js" LogicalName="TensorAgent.Core.WebUi.mask-editor.js" />
     <EmbeddedResource Include="..\..\..\TensorSharp.Chat\WebUi\mask-editor.css" LogicalName="TensorAgent.Core.WebUi.mask-editor.css" />
     <!-- The engine's own LoRA plug-in configs. A speed plug-in whose weights do not carry

@@ -1,0 +1,8 @@
+{
+  "sessions.title": "채팅 목록",
+  "sessions.newChat": "새 채팅",
+  "sessions.row.datePattern": "M월 d일 HH:mm",
+  "sessions.row.messages.one": "메시지 {count}개",
+  "sessions.row.messages.other": "메시지 {count}개",
+  "sessions.row.delete": "삭제"
+}

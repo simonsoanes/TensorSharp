@@ -53,7 +53,9 @@ public sealed class AppShell : Shell
         FlyoutBehavior = FlyoutBehavior.Disabled;
         BackgroundColor = Pages.Theme.Background;
 
-        Items.Add(new ShellContent { Title = "Chat", Route = "main", Content = chat });
+        var main = new ShellContent { Title = Core.Localization.Loc.T("shell.chat.title"), Route = "main", Content = chat };
+        Items.Add(main);
+        Core.Localization.Loc.Changed += () => Dispatcher.Dispatch(() => main.Title = Core.Localization.Loc.T("shell.chat.title"));
         _pages = new Dictionary<string, Page>(StringComparer.Ordinal)
         {
             ["sessions"] = sessions,

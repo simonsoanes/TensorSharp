@@ -12,6 +12,7 @@ using System.Buffers;
 using System.Security.Cryptography;
 using TensorAgent.Core.Downloads;
 using TensorAgent.Core.Interop;
+using TensorAgent.Core.Localization;
 
 namespace TensorAgent.Core.Catalog;
 
@@ -188,8 +189,7 @@ public sealed class ModelStore
         if (model.SideloadOnly)
         {
             throw new InvalidOperationException(
-                $"{model.DisplayName} has no verified publisher download URL. Import " +
-                $"the hash-pinned {model.Weights.FileName} file from the Models page instead.");
+                Loc.T("host.models.noDownloadUrl", ("model", model.DisplayName), ("file", model.Weights.FileName)));
         }
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -267,9 +267,9 @@ public sealed class ModelStore
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(source);
         if (!model.SideloadOnly)
-            throw new InvalidOperationException($"{model.DisplayName} is downloaded by the catalog, not imported.");
+            throw new InvalidOperationException(Loc.T("host.models.notImported", ("model", model.DisplayName)));
         if (!source.CanRead)
-            throw new ArgumentException("The selected model file cannot be read.", nameof(source));
+            throw new ArgumentException(Loc.T("host.import.unreadable"), nameof(source));
 
         CatalogFile weights = model.Weights;
         string directory = DirectoryFor(model);
@@ -297,9 +297,8 @@ public sealed class ModelStore
                     copied = checked(copied + read);
                     if (copied > weights.Bytes)
                     {
-                        throw new InvalidDataException(
-                            $"{Path.GetFileName(weights.FileName)} is larger than the expected " +
-                            $"{weights.Bytes:N0} bytes and is not the pinned catalog artifact.");
+                        throw new InvalidDataException(Loc.T("host.import.tooLarge",
+                            ("file", Path.GetFileName(weights.FileName)), ("bytes", weights.Bytes.ToString("N0", Loc.Culture))));
                     }
 
                     hash.AppendData(buffer, 0, read);
@@ -312,17 +311,16 @@ public sealed class ModelStore
 
             if (copied != weights.Bytes)
             {
-                throw new InvalidDataException(
-                    $"The selected file is {copied:N0} bytes; {weights.FileName} must be " +
-                    $"exactly {weights.Bytes:N0} bytes.");
+                throw new InvalidDataException(Loc.T("host.import.wrongSize",
+                    ("size", copied.ToString("N0", Loc.Culture)), ("file", weights.FileName),
+                    ("bytes", weights.Bytes.ToString("N0", Loc.Culture))));
             }
 
             string actualHash = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
             if (!string.Equals(actualHash, weights.Sha256, StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
-                    $"The selected file's SHA-256 is {actualHash}, not the pinned {weights.Sha256}. " +
-                    "Choose the exact GGUF named on the card.");
+                    Loc.T("host.import.wrongHash", ("actual", actualHash), ("expected", weights.Sha256)));
             }
 
             File.Move(staging, destination, overwrite: true);

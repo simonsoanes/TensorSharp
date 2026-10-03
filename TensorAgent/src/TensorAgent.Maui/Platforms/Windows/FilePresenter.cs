@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System.Diagnostics;
+using TensorAgent.Core.Localization;
 
 namespace TensorAgent.Maui.Services;
 
@@ -27,7 +28,7 @@ internal static class FilePresenter
     public static async Task<string?> PresentAsync(string fullPath, string? displayName)
     {
         if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath))
-            return "That file is no longer available.";
+            return Loc.T("app.openFile.missing");
 
         try
         {

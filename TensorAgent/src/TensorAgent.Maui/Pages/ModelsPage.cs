@@ -13,6 +13,7 @@ using System.Linq;
 using TensorAgent.Core.Catalog;
 using TensorAgent.Core.Downloads;
 using TensorAgent.Core.Hosting;
+using TensorAgent.Core.Localization;
 using TensorAgent.Core.Settings;
 using TensorAgent.Maui.Hosting;
 
@@ -56,9 +57,30 @@ public sealed class ModelsPage : ContentPage
     public ModelsPage(LoopbackWebHost host)
     {
         _app = host.App;
-        Title = "Models";
         BackgroundColor = Theme.Background;
         Padding = new Thickness(0);
+        Build();
+
+        // A new language rebuilds the screen, cells and all. The rows are rebuilt in it by
+        // the next Refresh, which appearing always runs.
+        Loc.Changed += () => Dispatcher.Dispatch(() =>
+        {
+            try
+            {
+                Build();
+                if (_visible)
+                    Refresh();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("TensorAgent: the models list failed to repaint in the new language: " + ex);
+            }
+        });
+    }
+
+    private void Build()
+    {
+        Title = Loc.T("models.title");
 
         var list = new CollectionView
         {
@@ -85,9 +107,7 @@ public sealed class ModelsPage : ContentPage
     {
         var label = new Label
         {
-            Text = $"Every built-in model, and what each one needs. This device has "
-                 + $"{_app.Paths.DeviceMemoryGB} GB, so the ones below the line cannot run here. "
-                 + "Downloads resume if interrupted and are kept for next time.",
+            Text = Loc.T("models.header", ("memory", _app.Paths.DeviceMemoryGB)),
             TextColor = Theme.Muted,
             FontSize = 13,
             Padding = new Thickness(16, 12, 16, 8),
@@ -170,7 +190,7 @@ public sealed class ModelsPage : ContentPage
                 default:
                     if (string.Equals(_pendingAutoSelectId, row.Model.Id, StringComparison.Ordinal))
                         _pendingAutoSelectId = null;
-                    row.Failed(_app.Models, status.Error ?? "the download failed");
+                    row.Failed(_app.Models, status.Error ?? Loc.T("models.status.downloadFailed"));
                     return;
             }
         });
@@ -236,7 +256,7 @@ public sealed class ModelsPage : ContentPage
 
         var addVision = new Button
         {
-            Text = "Add vision",
+            Text = Loc.T("models.action.addVision"),
             FontSize = 14,
             Padding = new Thickness(14, 6),
             BackgroundColor = Theme.Accent,
@@ -248,7 +268,7 @@ public sealed class ModelsPage : ContentPage
 
         var remove = new Button
         {
-            Text = "Delete",
+            Text = Loc.T("models.action.delete"),
             FontSize = 14,
             Padding = new Thickness(14, 6),
             BackgroundColor = Theme.Surface,
@@ -308,10 +328,12 @@ public sealed class ModelsPage : ContentPage
         if (!settings.AllowCellularDownloads && Services.DeviceState.IsOnCellularOnly())
         {
             await DisplayAlert(
-                "Waiting for Wi-Fi",
-                $"{row.Model.DisplayName} is {row.Model.TotalBytes / 1e9:0.0} GB and this device is on cellular. "
-                + "Turn on \u201CDownload over cellular\u201D in Settings to download it anyway.",
-                "OK");
+                Loc.T("models.alert.cellular.title"),
+                Loc.T("models.alert.cellular.model",
+                    ("model", row.Model.DisplayName),
+                    ("size", (row.Model.TotalBytes / 1e9).ToString("0.0", Loc.Culture)),
+                    ("setting", Loc.T("settings.downloads.cellular.title"))),
+                Loc.T("common.ok"));
             return;
         }
 
@@ -329,7 +351,7 @@ public sealed class ModelsPage : ContentPage
         {
             FileResult? picked = await FilePicker.Default.PickAsync(new PickOptions
             {
-                PickerTitle = $"Choose {row.Model.Weights.FileName}",
+                PickerTitle = Loc.T("models.import.pickerTitle", ("file", row.Model.Weights.FileName)),
             });
             if (picked is null)
                 return;
@@ -344,7 +366,7 @@ public sealed class ModelsPage : ContentPage
         catch (Exception ex)
         {
             row.Failed(_app.Models, ex.Message);
-            await DisplayAlert("Could not import this model", ex.Message, "OK");
+            await DisplayAlert(Loc.T("models.alert.importFailed.title"), ex.Message, Loc.T("common.ok"));
         }
     }
 
@@ -362,11 +384,12 @@ public sealed class ModelsPage : ContentPage
         if (!settings.AllowCellularDownloads && Services.DeviceState.IsOnCellularOnly())
         {
             await DisplayAlert(
-                "Waiting for Wi-Fi",
-                $"The vision file for {row.Model.DisplayName} has "
-                + $"{row.VisionBytesRemaining / 1e9:0.0} GB left to download. "
-                + "Turn on \u201CDownload over cellular\u201D in Settings to download it anyway.",
-                "OK");
+                Loc.T("models.alert.cellular.title"),
+                Loc.T("models.alert.cellular.vision",
+                    ("model", row.Model.DisplayName),
+                    ("size", (row.VisionBytesRemaining / 1e9).ToString("0.0", Loc.Culture)),
+                    ("setting", Loc.T("settings.downloads.cellular.title"))),
+                Loc.T("common.ok"));
             return;
         }
 
@@ -420,7 +443,7 @@ public sealed class ModelsPage : ContentPage
         catch (Exception ex)
         {
             row.Failed(_app.Models, ex.Message);
-            await DisplayAlert("Could not use this model", ex.Message, "OK");
+            await DisplayAlert(Loc.T("models.alert.useFailed.title"), ex.Message, Loc.T("common.ok"));
             Refresh();
         }
     }
@@ -450,11 +473,11 @@ public sealed class ModelsPage : ContentPage
     {
         if (row is null)
             return;
-        string recovery = row.Model.SideloadOnly
-            ? "You will need to choose the original local GGUF again to restore it."
-            : "It can be downloaded again.";
-        if (!await DisplayAlert("Delete model",
-                $"Remove {row.Model.DisplayName} from this device? {recovery}", "Delete", "Cancel"))
+        string message = row.Model.SideloadOnly
+            ? Loc.T("models.alert.delete.messageLocal", ("model", row.Model.DisplayName))
+            : Loc.T("models.alert.delete.message", ("model", row.Model.DisplayName));
+        if (!await DisplayAlert(Loc.T("models.alert.delete.title"), message,
+                Loc.T("models.alert.delete.confirm"), Loc.T("common.cancel")))
         {
             return;
         }
@@ -495,11 +518,11 @@ public sealed class ModelRow : BindableObject
             && string.Equals(model.Weights.FileName, loadedModelName, StringComparison.OrdinalIgnoreCase)
             && !loadedVisionReady;
         _status = DescribeState(store);
-        _actionLabel = !Runnable ? "Too big"
-            : VisionActivationRequired ? "Enable vision"
-            : IsInstalled ? (IsSelected ? "Selected" : "Use")
-            : model.SideloadOnly ? "Import"
-            : "Download";
+        _actionLabel = !Runnable ? Loc.T("models.action.tooBig")
+            : VisionActivationRequired ? Loc.T("models.action.enableVision")
+            : IsInstalled ? (IsSelected ? Loc.T("models.action.selected") : Loc.T("models.action.use"))
+            : model.SideloadOnly ? Loc.T("models.action.import")
+            : Loc.T("models.action.download");
 
         if (download is { IsRunning: true } running)
         {
@@ -508,7 +531,7 @@ public sealed class ModelRow : BindableObject
         }
         else if (download is { State: DownloadState.Failed } failed)
         {
-            Failed(store, failed.Error ?? "the download failed");
+            Failed(store, failed.Error ?? Loc.T("models.status.downloadFailed"));
         }
         else if (download is { State: DownloadState.Cancelled } && !IsInstalled)
         {
@@ -531,7 +554,7 @@ public sealed class ModelRow : BindableObject
     /// <summary>The projector arrived after this selected model was loaded text-only.</summary>
     public bool VisionActivationRequired { get; }
 
-    public string Title => Model.DisplayName + (IsSelected ? "  ·  in use" : string.Empty);
+    public string Title => IsSelected ? Loc.T("models.row.inUse", ("model", Model.DisplayName)) : Model.DisplayName;
 
     /// <summary>
     /// What the model IS, in the order someone deciding actually asks: how big is it,
@@ -539,13 +562,15 @@ public sealed class ModelRow : BindableObject
     /// experimental entries, so most of the list was a size and nothing else.
     /// </summary>
     public string Subtitle =>
-        $"{Model.Parameters} · {Model.Quantization} · {Gb(Model.TotalBytes)} GB "
-        + (Model.SideloadOnly ? "local file" : "download")
-        + (Model.Kind == CatalogArchitectureKind.MixtureOfExperts ? " · mixture of experts" : string.Empty)
-        + $"\nReads: {Reads}"
-        + (Model.SupportsThinking ? " · thinks when asked" : string.Empty)
+        $"{Model.Parameters} · {Model.Quantization} · "
+        + (Model.SideloadOnly
+            ? Loc.T("models.row.localFileSize", ("size", Gb(Model.TotalBytes)))
+            : Loc.T("models.row.downloadSize", ("size", Gb(Model.TotalBytes))))
+        + (Model.Kind == CatalogArchitectureKind.MixtureOfExperts ? " · " + Loc.T("models.row.mixtureOfExperts") : string.Empty)
+        + "\n" + Reads
+        + (Model.SupportsThinking ? " · " + Loc.T("models.row.thinks") : string.Empty)
         + (string.IsNullOrWhiteSpace(Model.Notes) ? string.Empty
-            : "\n" + (Model.Experimental ? "Experimental: " : string.Empty) + Model.Notes);
+            : "\n" + (Model.Experimental ? Loc.T("models.row.experimental", ("notes", Model.Notes)) : Model.Notes));
 
     /// <summary>Every input this entry accepts, not just images, and for a model that makes
     /// pictures or clips rather than text, what it makes.</summary>
@@ -553,15 +578,31 @@ public sealed class ModelRow : BindableObject
     {
         get
         {
-            var parts = new List<string> { "text" };
-            if (Model.Modalities.HasFlag(CatalogModalities.Image)) parts.Add("images");
-            if (Model.Modalities.HasFlag(CatalogModalities.Audio)) parts.Add("audio");
-            if (Model.Modalities.HasFlag(CatalogModalities.Video)) parts.Add("video");
-            if (Model.Kind != CatalogArchitectureKind.Diffusion) return string.Join(", ", parts);
-            string makes = Model.IsVideoGenerator
-                ? Model.Modalities.HasFlag(CatalogModalities.AudioOutput) ? "makes video clips with sound" : "makes video clips"
-                : "makes pictures";
-            return parts.Count == 1 ? $"a prompt, and {makes}" : $"a prompt and {string.Join(", ", parts.Skip(1))}, and {makes}";
+            var parts = new List<string> { Loc.T("models.row.input.text") };
+            if (Model.Modalities.HasFlag(CatalogModalities.Image)) parts.Add(Loc.T("models.row.input.images"));
+            if (Model.Modalities.HasFlag(CatalogModalities.Audio)) parts.Add(Loc.T("models.row.input.audio"));
+            if (Model.Modalities.HasFlag(CatalogModalities.Video)) parts.Add(Loc.T("models.row.input.video"));
+            string separator = Loc.T("models.row.input.separator");
+            if (Model.Kind != CatalogArchitectureKind.Diffusion)
+                return Loc.T("models.row.reads", ("inputs", string.Join(separator, parts)));
+            // What it reads and what it makes is one sentence, so each kind is a whole line,
+            // with and without inputs beyond the prompt.
+            string inputs = string.Join(separator, parts.Skip(1));
+            if (!Model.IsVideoGenerator)
+            {
+                return parts.Count == 1
+                    ? Loc.T("models.row.makes.pictures")
+                    : Loc.T("models.row.makes.picturesWithInputs", ("inputs", inputs));
+            }
+            if (Model.Modalities.HasFlag(CatalogModalities.AudioOutput))
+            {
+                return parts.Count == 1
+                    ? Loc.T("models.row.makes.clipsWithSound")
+                    : Loc.T("models.row.makes.clipsWithSoundWithInputs", ("inputs", inputs));
+            }
+            return parts.Count == 1
+                ? Loc.T("models.row.makes.clips")
+                : Loc.T("models.row.makes.clipsWithInputs", ("inputs", inputs));
         }
     }
 
@@ -578,46 +619,55 @@ public sealed class ModelRow : BindableObject
     public void BeginDownload()
     {
         IsBusy = true;
-        ActionLabel = "Stop";
-        Status = "Starting…";
+        ActionLabel = Loc.T("models.action.stop");
+        Status = Loc.T("models.status.starting");
     }
 
     public void BeginVisionDownload()
     {
         IsBusy = true;
-        ActionLabel = "Stop";
-        Status = "Starting the vision download…";
+        ActionLabel = Loc.T("models.action.stop");
+        Status = Loc.T("models.status.startingVision");
     }
 
     public void BeginImport()
     {
         IsBusy = true;
-        ActionLabel = "Importing…";
-        Status = "Copying and verifying the local GGUF…";
+        ActionLabel = Loc.T("models.action.importing");
+        Status = Loc.T("models.status.importing");
     }
 
     public void ReportImport(long bytes)
     {
         Fraction = Model.TotalBytes > 0 ? Math.Min(1.0, (double)bytes / Model.TotalBytes) : 0;
-        Status = $"Importing · {Gb(bytes)}/{Gb(Model.TotalBytes)} GB";
+        Status = Loc.T("models.status.importProgress", ("copied", Gb(bytes)), ("total", Gb(Model.TotalBytes)));
     }
 
     /// <summary>Loading the weights, which is seconds rather than instant.</summary>
     public void BeginLoading()
     {
         IsBusy = true;
-        ActionLabel = "Loading…";
-        Status = "Loading onto the GPU…";
+        ActionLabel = Loc.T("models.action.loading");
+        Status = Loc.T("models.status.loading");
     }
 
     public void Report(ModelDownloadProgress p)
     {
         Fraction = p.Fraction;
-        string speed = p.BytesPerSecond > 1 ? $" · {p.BytesPerSecond / 1e6:0.0} MB/s" : string.Empty;
-        string eta = p.Eta is { } left ? $" · {Math.Round(left.TotalMinutes)} min left" : string.Empty;
         // FileIndex is already 1-based (ModelDownloadProgress); adding one more showed the
         // first of seven files as "2/7" and a finished download as "8/7".
-        Status = $"{p.Phase} {p.FileIndex}/{p.FileCount} · {Gb(p.BytesReceived)}/{Gb(p.TotalBytes)} GB{speed}{eta}";
+        var parts = new List<string>
+        {
+            p.Phase == "verifying"
+                ? Loc.T("models.progress.verifying", ("file", p.FileIndex), ("files", p.FileCount))
+                : Loc.T("models.progress.downloading", ("file", p.FileIndex), ("files", p.FileCount)),
+            Loc.T("models.progress.size", ("received", Gb(p.BytesReceived)), ("total", Gb(p.TotalBytes))),
+        };
+        if (p.BytesPerSecond > 1)
+            parts.Add(Loc.T("models.progress.speed", ("speed", (p.BytesPerSecond / 1e6).ToString("0.0", Loc.Culture))));
+        if (p.Eta is { } left)
+            parts.Add(Loc.T("models.progress.eta", ("minutes", Math.Round(left.TotalMinutes))));
+        Status = string.Join(" · ", parts);
     }
 
     public void Finish(ModelStore store)
@@ -625,7 +675,7 @@ public sealed class ModelRow : BindableObject
         IsBusy = false;
         RefreshInstallState(store);
         Fraction = 1;
-        ActionLabel = IsSelected ? "Selected" : "Use";
+        ActionLabel = IsSelected ? Loc.T("models.action.selected") : Loc.T("models.action.use");
         Status = DescribeState(store);
         OnPropertyChanged(nameof(CanDelete));
         OnPropertyChanged(nameof(CanAddVision));
@@ -636,9 +686,9 @@ public sealed class ModelRow : BindableObject
         IsBusy = false;
         RefreshInstallState(store);
         ActionLabel = IsInstalled
-            ? (VisionActivationRequired ? "Enable vision" : IsSelected ? "Selected" : "Use")
-            : "Resume";
-        Status = "Stopped. " + DescribeState(store);
+            ? (VisionActivationRequired ? Loc.T("models.action.enableVision") : IsSelected ? Loc.T("models.action.selected") : Loc.T("models.action.use"))
+            : Loc.T("models.action.resume");
+        Status = Loc.T("models.status.stopped", ("state", DescribeState(store)));
         OnPropertyChanged(nameof(CanAddVision));
     }
 
@@ -647,9 +697,9 @@ public sealed class ModelRow : BindableObject
         IsBusy = false;
         RefreshInstallState(store);
         ActionLabel = IsInstalled
-            ? (VisionActivationRequired ? "Enable vision" : IsSelected ? "Selected" : "Use")
-            : Model.SideloadOnly ? "Import"
-            : "Retry";
+            ? (VisionActivationRequired ? Loc.T("models.action.enableVision") : IsSelected ? Loc.T("models.action.selected") : Loc.T("models.action.use"))
+            : Model.SideloadOnly ? Loc.T("models.action.import")
+            : Loc.T("models.action.retry");
         Status = message;
         OnPropertyChanged(nameof(CanAddVision));
     }
@@ -660,34 +710,34 @@ public sealed class ModelRow : BindableObject
         {
             // Said as a fact about the hardware rather than as a refusal, and it names
             // both numbers so the user can see how far off it is instead of guessing.
-            return $"Needs a {Model.MinDeviceMemoryGB} GB device · this one has {DeviceMemoryGB} GB";
+            return Loc.T("models.status.needsDevice", ("required", Model.MinDeviceMemoryGB), ("available", DeviceMemoryGB));
         }
 
         if (NeedsVisionProjector)
         {
-            return $"Text ready · vision file not downloaded · {Gb(VisionBytesRemaining)} GB to add · {Model.License}";
+            return Loc.T("models.status.visionMissing", ("size", Gb(VisionBytesRemaining)), ("license", Model.License));
         }
 
         if (VisionActivationRequired)
         {
-            return $"Vision downloaded · tap Enable vision to load it · {Model.License}";
+            return Loc.T("models.status.visionDownloaded", ("action", Loc.T("models.action.enableVision")), ("license", Model.License));
         }
 
         if (Model.SideloadOnly && store.StateOf(Model) != InstallState.Installed)
         {
-            return $"Not imported · choose {Model.Weights.FileName} from Files · {Model.License}";
+            return Loc.T("models.status.notImported", ("file", Model.Weights.FileName), ("license", Model.License));
         }
 
         return store.StateOf(Model) switch
         {
-            InstallState.Installed => $"On this device · {Gb(store.InstalledBytes(Model))} GB · {Model.License}",
-            InstallState.Partial => $"Partly downloaded · {Gb(store.RemainingBytes(Model))} GB still to fetch",
+            InstallState.Installed => Loc.T("models.status.installed", ("size", Gb(store.InstalledBytes(Model))), ("license", Model.License)),
+            InstallState.Partial => Loc.T("models.status.partial", ("size", Gb(store.RemainingBytes(Model)))),
             // What the download will actually move: files another installed entry already
             // holds are linked, not fetched (the second MiniMax-H3 checkpoint is its 11 GB
             // denoiser, not 35 GB).
             _ when store.RemainingBytes(Model) is long fetch && fetch < Model.TotalBytes =>
-                $"Not downloaded · {Gb(fetch)} GB to fetch, the rest already on this device · {Model.License}",
-            _ => $"Not downloaded · {Gb(Model.TotalBytes)} GB · {Model.License}",
+                Loc.T("models.status.notDownloadedShared", ("size", Gb(fetch)), ("license", Model.License)),
+            _ => Loc.T("models.status.notDownloaded", ("size", Gb(Model.TotalBytes)), ("license", Model.License)),
         };
     }
 
@@ -709,7 +759,7 @@ public sealed class ModelRow : BindableObject
         VisionBytesRemaining = projector.Bytes - have;
     }
 
-    private static string Gb(long bytes) => (bytes / 1e9).ToString("0.00");
+    private static string Gb(long bytes) => (bytes / 1e9).ToString("0.00", Loc.Culture);
 }
 
 /// <summary>The Web UI's own palette, so the native pages do not look bolted on.</summary>

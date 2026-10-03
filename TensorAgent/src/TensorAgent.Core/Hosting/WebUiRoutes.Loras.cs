@@ -11,6 +11,7 @@
 using System.Text.Json;
 using TensorAgent.Core.Catalog;
 using TensorAgent.Core.Downloads;
+using TensorAgent.Core.Localization;
 using TensorAgent.Core.Settings;
 
 namespace TensorAgent.Core.Hosting;
@@ -31,7 +32,7 @@ public static partial class WebUiRoutes
         CatalogLora? Find(string id) =>
             LoraCatalog.Find(id) is { } lora && host.Catalog.Any(m => m.Id == lora.BaseModelId) ? lora : null;
 
-        LoopbackResponse? NotFound(string id) => LoopbackResponse.Json(new { error = $"no LoRA plug-in '{id}'" }, 404);
+        LoopbackResponse? NotFound(string id) => LoopbackResponse.Json(new { error = Loc.T("host.loras.notFound", ("id", id)) }, 404);
 
         server.MapGet("/api/agent/loras", (_, _) => Ok(DescribeLoras(host)));
 
@@ -77,20 +78,20 @@ public static partial class WebUiRoutes
                 {
                     if (item.ValueKind != JsonValueKind.Object
                         || !item.TryGetProperty("id", out JsonElement id) || id.ValueKind != JsonValueKind.String)
-                        return LoopbackResponse.Json(new { error = "each LoRA is { \"id\": ..., \"strength\": ... }" }, 400);
+                        return LoopbackResponse.Json(new { error = Loc.T("host.loras.choice.badItem") }, 400);
                     // No strength, or null, is the plug-in's own; anything else must be a number.
                     float strength = LoraCatalog.Find(id.GetString()!)?.DefaultStrength ?? 1f;
                     if (item.TryGetProperty("strength", out JsonElement s) && s.ValueKind != JsonValueKind.Null)
                     {
                         if (s.ValueKind != JsonValueKind.Number || !s.TryGetSingle(out strength))
-                            return LoopbackResponse.Json(new { error = $"the strength of '{id.GetString()}' must be a number" }, 400);
+                            return LoopbackResponse.Json(new { error = Loc.T("host.loras.choice.badStrength", ("id", id.GetString())) }, 400);
                     }
                     requested.Add(new ImageLoraChoice(id.GetString()!, strength));
                 }
             }
             else
             {
-                return LoopbackResponse.Json(new { error = "expected { \"loras\": [ { \"id\", \"strength\" } ] }" }, 400);
+                return LoopbackResponse.Json(new { error = Loc.T("host.loras.choice.badBody") }, 400);
             }
 
             return host.ChooseLoras(requested, out string? error) is null

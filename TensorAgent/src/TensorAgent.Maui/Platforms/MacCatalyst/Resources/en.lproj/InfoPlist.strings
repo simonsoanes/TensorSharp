@@ -1,0 +1,4 @@
+"NSCameraUsageDescription" = "TensorAgent uses the camera to take pictures you want the on-device model to look at.";
+"NSMicrophoneUsageDescription" = "TensorAgent uses the microphone to dictate messages and to attach audio for the on-device model.";
+"NSPhotoLibraryUsageDescription" = "TensorAgent reads photos and videos you choose to attach to a conversation.";
+"NSSpeechRecognitionUsageDescription" = "TensorAgent transcribes your dictation into the message box.";

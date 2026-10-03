@@ -1,0 +1,8 @@
+{
+  "sessions.title": "チャット一覧",
+  "sessions.newChat": "新しいチャット",
+  "sessions.row.datePattern": "M月d日 HH:mm",
+  "sessions.row.messages.one": "{count} 件のメッセージ",
+  "sessions.row.messages.other": "{count} 件のメッセージ",
+  "sessions.row.delete": "削除"
+}

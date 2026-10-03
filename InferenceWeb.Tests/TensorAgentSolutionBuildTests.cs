@@ -176,13 +176,45 @@ public class TensorAgentSolutionBuildTests
         string clean = Target("CleanTensorAgentAppHead").Elements(Ns + "Exec").Single().Attribute("Command")!.Value;
         string arguments = PropertyValue("_TensorAgentAppArguments");
 
-        // The child runs on the SDK that answered the workload check: the dotnet that started
-        // the build, else the one this MSBuild belongs to, never just the first on PATH.
-        string[] dotnet = SolutionTargets.Descendants(Ns + "_TensorAgentDotnet").Select(e => e.Value).ToArray();
-        Assert.Equal("$(DOTNET_HOST_PATH)", dotnet[0]);
-        Assert.Contains("$([MSBuild]::NormalizePath('$(MSBuildBinPath)/../../dotnet'))", dotnet);
-        Assert.Contains("$([MSBuild]::NormalizePath('$(MSBuildBinPath)/../../dotnet.exe'))", dotnet);
-        Assert.Equal("dotnet", dotnet[^1]);
+        // Match the Apple scripts' user-local SDK: the system SDK's Apple workloads may
+        // require an older Xcode. An explicit choice wins; elsewhere retain the solution
+        // SDK fallback. The workload check, build and clean all use this same executable.
+        XElement[] dotnet = SolutionTargets.Descendants(Ns + "_TensorAgentDotnet").ToArray();
+        Assert.Equal(new[]
+        {
+            "$(TensorAgentDotnet)",
+            "$(DOTNET_ROOT)/dotnet",
+            "$(HOME)/.dotnet/dotnet",
+            "$(DOTNET_HOST_PATH)",
+            "$([MSBuild]::NormalizePath('$(MSBuildBinPath)/../../dotnet'))",
+            "$([MSBuild]::NormalizePath('$(MSBuildBinPath)/../../dotnet.exe'))",
+            "dotnet",
+        }, dotnet.Select(e => e.Value).ToArray());
+        Assert.Null(dotnet[0].Attribute("Condition"));
+        Assert.All(dotnet.Skip(1), e =>
+            Assert.Contains("'$(_TensorAgentDotnet)' == ''", e.Attribute("Condition")?.Value ?? string.Empty, StringComparison.Ordinal));
+        foreach (XElement localSdk in dotnet.Skip(1).Take(2))
+        {
+            string condition = localSdk.Attribute("Condition")!.Value;
+            Assert.Contains("IsOSPlatform('OSX')", condition, StringComparison.Ordinal);
+            Assert.Contains($"Exists('{localSdk.Value}')", condition, StringComparison.Ordinal);
+        }
+        Assert.Contains("'$(DOTNET_ROOT)' != ''", dotnet[1].Attribute("Condition")!.Value, StringComparison.Ordinal);
+        foreach (string script in new[] { "build-mac.sh", "build-sim.sh" })
+            Assert.Contains("${DOTNET_ROOT:-$HOME/.dotnet}", ScriptText(script), StringComparison.Ordinal);
+
+        // Parent MSBuild exports SDK paths. Each subprocess must clear them before the
+        // selected dotnet chooses its own SDK imports and out-of-process task host.
+        XElement[] commandPrefixes = SolutionTargets.Descendants(Ns + "_TensorAgentAppCommandPrefix").ToArray();
+        Assert.Equal(2, commandPrefixes.Length);
+        Assert.Equal("!$([MSBuild]::IsOSPlatform('Windows'))", commandPrefixes[0].Attribute("Condition")?.Value);
+        Assert.Equal("$([MSBuild]::IsOSPlatform('Windows'))", commandPrefixes[1].Attribute("Condition")?.Value);
+        Assert.StartsWith("env -u ", commandPrefixes[0].Value, StringComparison.Ordinal);
+        foreach (string variable in new[] { "MSBUILD_EXE_PATH", "MSBuildExtensionsPath", "MSBuildSDKsPath", "DOTNET_HOST_PATH" })
+        {
+            Assert.Contains($"-u {variable} ", commandPrefixes[0].Value, StringComparison.Ordinal);
+            Assert.Contains($"set \"{variable}=\" & ", commandPrefixes[1].Value, StringComparison.Ordinal);
+        }
 
         // The scripts export the MLX skip (the app never uses MLX), and a native build skipped
         // for the solution stays skipped for the app; only the environment reaches it, since
@@ -192,8 +224,8 @@ public class TensorAgentSolutionBuildTests
         string[] environment = SolutionTargets.Descendants(Ns + "_TensorAgentAppEnvironment").Select(e => e.Value).ToArray();
         Assert.Equal("TENSORSHARP_MLX_NATIVE_SKIP=true", environment[0]);
         Assert.Contains("$(_TensorAgentAppEnvironment);TENSORSHARP_GGML_NATIVE_SKIP=true", environment);
-        Assert.StartsWith("\"$(_TensorAgentDotnet)\" build \"$(_TensorAgentAppProject)\" -f %(_TensorAgentAppBuildHead.Identity) %(_TensorAgentAppBuildHead.Arguments)", build, StringComparison.Ordinal);
-        Assert.StartsWith("\"$(_TensorAgentDotnet)\" clean \"$(_TensorAgentAppProject)\" -f %(_TensorAgentAppAvailableHead.Identity) %(_TensorAgentAppAvailableHead.Arguments)", clean, StringComparison.Ordinal);
+        Assert.StartsWith("$(_TensorAgentAppCommandPrefix)\"$(_TensorAgentDotnet)\" build \"$(_TensorAgentAppProject)\" -f %(_TensorAgentAppBuildHead.Identity) %(_TensorAgentAppBuildHead.Arguments)", build, StringComparison.Ordinal);
+        Assert.StartsWith("$(_TensorAgentAppCommandPrefix)\"$(_TensorAgentDotnet)\" clean \"$(_TensorAgentAppProject)\" -f %(_TensorAgentAppAvailableHead.Identity) %(_TensorAgentAppAvailableHead.Arguments)", clean, StringComparison.Ordinal);
         Assert.EndsWith("$(_TensorAgentAppArguments)", build, StringComparison.Ordinal);
         Assert.EndsWith("$(_TensorAgentAppArguments)", clean, StringComparison.Ordinal);
 
@@ -258,14 +290,35 @@ public class TensorAgentSolutionBuildTests
     public void SolutionBuild_AsksTheSdkWhichWorkloadsAreMissingAndSaysSo()
     {
         XDocument targets = SolutionTargets;
-        // The SDK's own check: guessing from pack folders breaks on user-local and MSI
-        // installs, and a missing workload must be named, not skipped silently.
-        XElement probe = Assert.Single(targets.Descendants(Ns + "MSBuild"));
-        Assert.Equal("$(_TensorAgentAppProject)", probe.Attribute("Projects")?.Value);
-        Assert.Equal("GetSuggestedWorkloads", probe.Attribute("Targets")?.Value);
-        Assert.Equal("TargetFramework=%(_TensorAgentAppTargetFramework.Identity)", probe.Attribute("Properties")?.Value);
+        // Run the SDK's own check in the selected executable. An in-process MSBuild task
+        // would check the solution SDK's manifests and could disagree with the app build.
+        Assert.Empty(targets.Descendants(Ns + "MSBuild"));
+        XElement probe = Assert.Single(Target("_ResolveTensorAgentAppHeads").Elements(Ns + "Exec"));
+        string probeCommand = probe.Attribute("Command")!.Value;
+        Assert.StartsWith("$(_TensorAgentAppCommandPrefix)\"$(_TensorAgentDotnet)\" msbuild \"$(MSBuildThisFileDirectory)eng/TensorAgentAppWorkloadProbe.proj\"", probeCommand, StringComparison.Ordinal);
+        Assert.Contains("\"-p:TensorAgentAppProject=$(_TensorAgentAppProject)\"", probeCommand, StringComparison.Ordinal);
+        Assert.Contains("-p:TargetFramework=%(_TensorAgentAppTargetFramework.Identity)", probeCommand, StringComparison.Ordinal);
+        Assert.Equal("true", probe.Attribute("ConsoleToMSBuild")?.Value);
+        Assert.NotEqual("true", probe.Attribute("IgnoreExitCode")?.Value);
+        Assert.Null(probe.Attribute("ContinueOnError"));
+        Assert.Equal("_TensorAgentAppProbeOutput", Assert.Single(probe.Elements(Ns + "Output")).Attribute("ItemName")?.Value);
+
+        XDocument workloadProbe = XDocument.Load(Path.Combine(RepoRoot, "eng", "TensorAgentAppWorkloadProbe.proj"));
+        XElement sdkProbe = Assert.Single(workloadProbe.Descendants(Ns + "MSBuild"));
+        Assert.Equal("$(TensorAgentAppProject)", sdkProbe.Attribute("Projects")?.Value);
+        Assert.Equal("GetSuggestedWorkloads", sdkProbe.Attribute("Targets")?.Value);
+        Assert.Equal("TargetFramework=$(TargetFramework)", sdkProbe.Attribute("Properties")?.Value);
+        XElement missingWorkloadMessage = Assert.Single(workloadProbe.Descendants(Ns + "Message"));
+        Assert.Equal("TENSORAGENT_MISSING_WORKLOAD=%(_TensorAgentMissingWorkload.Identity)", missingWorkloadMessage.Attribute("Text")?.Value);
+        XElement missingWorkload = Assert.Single(targets.Descendants(Ns + "_TensorAgentAppMissingWorkload"));
+        Assert.Equal("@(_TensorAgentAppProbeOutput)", missingWorkload.Attribute("Include")?.Value);
+        Assert.Contains("StartsWith('TENSORAGENT_MISSING_WORKLOAD=')", missingWorkload.Attribute("Condition")?.Value ?? string.Empty, StringComparison.Ordinal);
+        XElement missingWorkloadIds = Assert.Single(targets.Descendants(Ns + "_TensorAgentAppMissingWorkloadId"));
+        Assert.Contains("Replace('TENSORAGENT_MISSING_WORKLOAD=', '')", missingWorkloadIds.Attribute("Include")?.Value ?? string.Empty, StringComparison.Ordinal);
+        Assert.Contains("Distinct()", missingWorkloadIds.Attribute("Include")?.Value ?? string.Empty, StringComparison.Ordinal);
         string[] warnings = targets.Descendants(Ns + "Warning").Select(w => w.Attribute("Text")!.Value).ToArray();
-        Assert.Contains(warnings, w => w.Contains("dotnet workload install @(_TensorAgentAppMissingWorkloadId, ' ')", StringComparison.Ordinal));
+        Assert.Contains(warnings, w => w.Contains("The app SDK ($(_TensorAgentDotnet))", StringComparison.Ordinal));
+        Assert.Contains(warnings, w => w.Contains("\"$(_TensorAgentDotnet)\" workload install @(_TensorAgentAppMissingWorkloadId, ' ')", StringComparison.Ordinal));
         // A source-built SDK has no Apple manifests and suggests workloads that cannot help;
         // with MAUI already installed for one head, the SDK names the bare platform workload
         // (ios, maccatalyst) for the other, which an install does fix.

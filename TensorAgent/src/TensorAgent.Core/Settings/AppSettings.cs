@@ -20,6 +20,16 @@ public sealed class AppSettings
     /// <summary>Catalog id of the model the app loads at start and uses for new chats.</summary>
     [JsonPropertyName("selectedModelId")] public string? SelectedModelId { get; set; }
 
+    /// <summary>
+    /// The language of the app's own interface: a tag from
+    /// <see cref="Sharing.Localization.UiLanguages.Supported"/>, or empty to follow the
+    /// system's preferred languages, which is what a first launch does. Only the interface:
+    /// the model answers in whatever language it is written to. Written by the Settings
+    /// screen alone; the page's settings save keeps what is stored (see
+    /// <see cref="Hosting.WebUiRoutes.MapAgent"/>).
+    /// </summary>
+    [JsonPropertyName("uiLanguage")] public string UiLanguage { get; set; } = string.Empty;
+
     /// <summary>Whether the model may run programs and skill scripts (the shell tool,
     /// skills_run). Off means the tools are not even declared to the model.</summary>
     [JsonPropertyName("allowCodeExecution")] public bool AllowCodeExecution { get; set; } = true;

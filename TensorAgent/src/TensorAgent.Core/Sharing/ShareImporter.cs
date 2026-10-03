@@ -11,6 +11,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using TensorAgent.Core.Hosting;
+using TensorAgent.Core.Localization;
 using TensorAgent.Sharing;
 using TensorSharp.Chat;
 
@@ -115,7 +116,7 @@ public sealed class ShareImporter
                 // it. Both are "that file did not arrive", and both are worth a sentence:
                 // silently dropping an attachment is the failure this codebase has
                 // already paid for once, with photos.
-                importNotices.Add($"{shown} could not be read from the share.");
+                importNotices.Add(Loc.T("host.share.unreadable", ("file", shown)));
                 _log.LogWarning("Share {Id}: {File} did not resolve inside {Directory}",
                     payload.Id, item.File, envelopeDirectory ?? "(no envelope)");
                 continue;
@@ -131,12 +132,13 @@ public sealed class ShareImporter
 
             if (length == 0)
             {
-                importNotices.Add($"{shown} came through empty and was not attached.");
+                importNotices.Add(Loc.T("host.share.empty", ("file", shown)));
                 continue;
             }
             if (length > MaxFileBytes)
             {
-                importNotices.Add($"{shown} is {length / (1024.0 * 1024):0.#} MB, which is too large to attach.");
+                importNotices.Add(Loc.T("host.share.tooLarge",
+                    ("file", shown), ("size", (length / (1024.0 * 1024)).ToString("0.#", Loc.Culture))));
                 continue;
             }
 
@@ -189,7 +191,7 @@ public sealed class ShareImporter
             }
             catch (WebUiRequestRejectedException rejected)
             {
-                importNotices.Add($"{file.ShownName} could not be attached: {ReasonOf(rejected)}");
+                importNotices.Add(Loc.T("host.share.refused", ("file", file.ShownName), ("reason", ReasonOf(rejected))));
                 _log.LogWarning("Share {Id}: {Name} rejected", payload.Id, file.ShownName);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -201,7 +203,7 @@ public sealed class ShareImporter
             }
             catch (NotSupportedException ex)
             {
-                importNotices.Add($"{file.ShownName} could not be attached: {ex.Message}");
+                importNotices.Add(Loc.T("host.share.refused", ("file", file.ShownName), ("reason", ex.Message)));
                 _log.LogWarning(ex, "Share {Id}: {Name} is not supported", payload.Id, file.ShownName);
             }
             catch

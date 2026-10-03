@@ -12,6 +12,7 @@ using System.Text.Json;
 #if IOS
 using Foundation;
 #endif
+using TensorAgent.Core.Localization;
 using TensorAgent.Maui.Hosting;
 #if IOS
 using UserNotifications;
@@ -41,9 +42,18 @@ public sealed class MainPage : ContentPage
     /// before the first `ready`, silence is normal.
     /// </summary>
     private bool _pageReady;
+    private bool _chatVisible;
+    private bool _languageReloadPending;
+    private bool _languageReloadRetryScheduled;
 #if IOS
     private int _shareNotificationPrompting;
 #endif
+
+    /// <summary>What the engine probe found once the host started; null before then.</summary>
+    private EngineProbeResult? _probe;
+
+    /// <summary>Why the host did not start, or null while nothing has failed.</summary>
+    private string? _startupFailure;
 
     public MainPage(LoopbackWebHost host)
     {
@@ -62,8 +72,8 @@ public sealed class MainPage : ContentPage
             BackgroundColor = BarBackground,
             LineBreakMode = LineBreakMode.TailTruncation,
             VerticalOptions = LayoutOptions.Center,
-            Text = "Starting the engine…",
         };
+        ShowStatus();
 
         _webView = new WebView
         {
@@ -101,6 +111,15 @@ public sealed class MainPage : ContentPage
 #if DEBUG
         _webView.Navigated += OnNavigatedSendDemoPrompt;
 #endif
+        // A covered WebView may be suspended. Reload when it is visible again,
+        // after giving the page a chance to retain its unsent composer.
+        Loc.Changed += () => MainThread.BeginInvokeOnMainThread(async () =>
+        {
+            ShowStatus();
+            _languageReloadPending = true;
+            if (_chatVisible)
+                await ReloadLanguageAsync();
+        });
         StartHost();
     }
 
@@ -178,14 +197,14 @@ public sealed class MainPage : ContentPage
 
         if (!_host.App.Artifacts.TryResolve(runId, relative, out string? full, out string? error))
         {
-            await DisplayAlert("Cannot open", error ?? "That file is no longer available.", "OK");
+            await DisplayAlert(Loc.T("app.openFile.alert.title"), error ?? Loc.T("app.openFile.missing"), Loc.T("common.ok"));
             return;
         }
 
         string? failure = await Services.FilePresenter.PresentAsync(
             full!, string.IsNullOrWhiteSpace(displayName) ? Path.GetFileName(relative) : displayName);
         if (failure is not null)
-            await DisplayAlert("Cannot open", failure, "OK");
+            await DisplayAlert(Loc.T("app.openFile.alert.title"), failure, Loc.T("common.ok"));
     }
 
 #if DEBUG
@@ -762,7 +781,7 @@ public sealed class MainPage : ContentPage
             {
                 _host.App.Settings.Save(original);
                 _host.App.ApplySettings(original);
-                Console.WriteLine($"TensorAgent: netcheck restored to allowNetwork={original.AllowNetwork} · {_host.App.DescribeEngine()}");
+                Console.WriteLine($"TensorAgent: netcheck restored to allowNetwork={original.AllowNetwork} · {_host.App.DescribeEngineForLog()}");
             }
         });
 
@@ -773,7 +792,7 @@ public sealed class MainPage : ContentPage
             _host.App.Settings.Save(settings);
             // Exactly what the Settings page does, and the line that used to be missing.
             _host.App.ApplySettings(settings);
-            Console.WriteLine($"TensorAgent: netcheck switch -> {allow} · {_host.App.DescribeEngine()}");
+            Console.WriteLine($"TensorAgent: netcheck switch -> {allow} · {_host.App.DescribeEngineForLog()}");
         }
     }
 
@@ -1299,8 +1318,11 @@ public sealed class MainPage : ContentPage
     protected override async void OnAppearing()
     {
         base.OnAppearing();
+        _chatVisible = true;
         try
         {
+            if (_languageReloadPending && await ReloadLanguageAsync())
+                return;
             // First, because everything after it is pointless if the answer is no. iOS
             // suspends a WKWebView's content process the moment its view leaves the
             // window -- which every other screen in this app does -- and a suspended
@@ -1339,6 +1361,57 @@ public sealed class MainPage : ContentPage
         {
             Console.WriteLine("TensorAgent: refresh on appearing failed: " + ex.Message);
         }
+    }
+
+    protected override void OnDisappearing()
+    {
+        _chatVisible = false;
+        base.OnDisappearing();
+    }
+
+    private async Task<bool> ReloadLanguageAsync()
+    {
+        try
+        {
+            if (_pageReady && await PageIsAliveAsync())
+            {
+                string? kept = await Tell("prepareLanguageReload");
+                if (string.Equals(kept?.Trim('"'), "busy", StringComparison.Ordinal))
+                {
+                    ScheduleLanguageReload();
+                    return false;
+                }
+                if (!string.Equals(kept?.Trim('"'), "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine("TensorAgent: language reload deferred because the composer could not be retained");
+                    return false;
+                }
+            }
+            _languageReloadPending = false;
+            _pageReady = false;
+            Console.WriteLine($"TensorAgent: reloading the page in {Loc.Language.Tag}");
+            _webView.Source = new UrlWebViewSource { Url = _host.EntryUrl };
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _languageReloadPending = true;
+            Console.WriteLine("TensorAgent: the page did not reload in the new language: " + ex.Message);
+            return false;
+        }
+    }
+
+    private void ScheduleLanguageReload()
+    {
+        if (_languageReloadRetryScheduled)
+            return;
+        _languageReloadRetryScheduled = true;
+        Dispatcher.DispatchDelayed(TimeSpan.FromMilliseconds(500), async () =>
+        {
+            _languageReloadRetryScheduled = false;
+            if (_chatVisible && _languageReloadPending)
+                await ReloadLanguageAsync();
+        });
     }
 
     /// <summary>
@@ -1384,9 +1457,9 @@ public sealed class MainPage : ContentPage
     {
         dictation = Services.Dictation.IsSupported,
 #if WINDOWS
-        composerHint = "Message… or press Windows+H to dictate",
+        composerHint = Loc.T("app.composer.placeholderWindows"),
 #else
-        composerHint = "Message…",
+        composerHint = Loc.T("app.composer.placeholder"),
 #endif
     });
 
@@ -1658,10 +1731,10 @@ public sealed class MainPage : ContentPage
 
             NSUserDefaults.StandardUserDefaults.SetBool(true, askedKey);
             bool allow = await DisplayAlertAsync(
-                "Open future shares faster?",
-                "iOS cannot let a Share extension switch apps directly. Allow notifications so future shares can offer a one-tap way to open TensorAgent.",
-                "Allow",
-                "Not now");
+                Loc.T("app.shareNotifications.alert.title"),
+                Loc.T("app.shareNotifications.alert.message"),
+                Loc.T("app.shareNotifications.alert.allow"),
+                Loc.T("app.shareNotifications.alert.notNow"));
             if (allow)
                 await center.RequestAuthorizationAsync(UNAuthorizationOptions.Alert);
         }
@@ -1754,7 +1827,7 @@ public sealed class MainPage : ContentPage
             {
                 MediaSource.Library => await MediaPicker.Default.PickPhotoAsync(),
                 MediaSource.Camera when MediaPicker.Default.IsCaptureSupported => await MediaPicker.Default.CapturePhotoAsync(),
-                MediaSource.Camera => throw new NotSupportedException("This device has no camera available to the app."),
+                MediaSource.Camera => throw new NotSupportedException(Loc.T("app.attach.noCamera")),
                 MediaSource.Video => await MediaPicker.Default.PickVideoAsync(),
                 MediaSource.File => await FilePicker.Default.PickAsync(),
                 _ => null,
@@ -1765,13 +1838,14 @@ public sealed class MainPage : ContentPage
             // Picker availability and permission errors happen before there is a file
             // to upload. This callback runs through an async UI event, so letting the
             // exception escape can close the app on a desktop without a camera.
-            await Notice("Could not open the attachment picker: " + ex.Message);
+            await Notice(Loc.T("app.attach.pickerFailed", ("reason", ex.Message)));
             return;
         }
         if (picked is null)
             return;
 
-        string shown = string.IsNullOrWhiteSpace(picked.FileName) ? "That file" : picked.FileName;
+        // A pick without a name is "That file", which is a sentence of its own in each message.
+        string? named = string.IsNullOrWhiteSpace(picked.FileName) ? null : picked.FileName;
         string spooled = Path.Combine(Path.GetTempPath(), "attach-" + Guid.NewGuid().ToString("N"));
         try
         {
@@ -1780,7 +1854,9 @@ public sealed class MainPage : ContentPage
                 $"TensorAgent: attach {source} name='{picked.FileName}' type='{picked.ContentType}' bytes={length}");
             if (length == 0)
             {
-                await Notice($"{shown} could not be attached: it came back empty from the picker.");
+                await Notice(named is null
+                    ? Loc.T("app.attach.emptyUnnamed")
+                    : Loc.T("app.attach.empty", ("name", named)));
                 return;
             }
 
@@ -1799,18 +1875,20 @@ public sealed class MainPage : ContentPage
                 // Uploaded and then lost between here and the composer. Worth its own
                 // sentence: "nothing happened" is what this looked like for every
                 // multi-line file before the bridge stopped splicing JSON into source.
-                await Notice($"{shown} was uploaded but could not be attached to the chat.");
+                await Notice(named is null
+                    ? Loc.T("app.attach.notAttachedUnnamed")
+                    : Loc.T("app.attach.notAttached", ("name", named)));
             }
         }
         catch (TensorSharp.Chat.WebUiRequestRejectedException rejected)
         {
             // Every refusal carries a sentence written for a person, and that sentence is
             // the whole value of showing the failure at all.
-            await Notice($"{shown} could not be attached: {ReasonOf(rejected)}");
+            await Notice(CouldNotAttach(named, ReasonOf(rejected)));
         }
         catch (Exception ex)
         {
-            await Notice($"{shown} could not be attached: {ex.Message}");
+            await Notice(CouldNotAttach(named, ex.Message));
         }
         finally
         {
@@ -1870,6 +1948,11 @@ public sealed class MainPage : ContentPage
         catch (JsonException) { /* fall through to the exception's own words */ }
         return rejected.Message;
     }
+
+    /// <summary>The notice for a pick that could not be attached, with its name or as "That file".</summary>
+    private static string CouldNotAttach(string? name, string reason) => name is null
+        ? Loc.T("app.attach.failedUnnamed", ("reason", reason))
+        : Loc.T("app.attach.failed", ("name", name), ("reason", reason));
 
     /// <summary>
     /// Dictation, as a toggle. Speech recognition on iOS is a live session rather than
@@ -1941,7 +2024,7 @@ public sealed class MainPage : ContentPage
         }
         catch (Exception ex)
         {
-            await Notice("Dictation failed: " + ex.Message);
+            await Notice(Loc.T("app.dictation.failed", ("reason", ex.Message)));
         }
         finally
         {
@@ -2132,17 +2215,8 @@ public sealed class MainPage : ContentPage
             // (X-TensorAgent-Token). A release build keeps the token in-process.
             Console.WriteLine($"TensorAgent: entry URL {_host.EntryUrl}");
 #endif
-            _status.Text =
-#if IOS
-                $"{probe.Backend} · GgmlOps {(probe.MainProgramHandleResolved ? "linked" : "NOT linked")}" +
-#else
-                $"{probe.Backend} · GgmlOps {(probe.NativeLibraryLoaded ? "loaded" : "NOT loaded")}" +
-#endif
-#if IOS || MACCATALYST
-                $" · {probe.GpuName ?? "no Metal device"} · :{_host.Port}";
-#else
-                $" · {probe.Reason} · :{_host.Port}";
-#endif
+            _probe = probe;
+            ShowStatus();
             // The page says when the model starts and stops working; the display is
             // held awake for exactly that stretch, because on iOS the screen sleeping
             // suspends the app and stops the generation partway.
@@ -2169,9 +2243,43 @@ public sealed class MainPage : ContentPage
             // Say so once, in the UI and on stdout; there is no useful fallback
             // page without the loopback host.
             Console.WriteLine("TensorAgent: startup failed: " + ex);
+            _startupFailure = ex.Message;
+            ShowStatus();
+        }
+    }
+
+    /// <summary>
+    /// The status line, in the interface's language: written at construction, again once
+    /// the host has started or failed to, and again whenever the language changes.
+    /// </summary>
+    private void ShowStatus()
+    {
+        if (_startupFailure is not null)
+        {
             _status.TextColor = BarError;
             _status.LineBreakMode = LineBreakMode.WordWrap;
-            _status.Text = "Startup failed: " + ex.Message;
+            _status.Text = Loc.T("app.status.startupFailed", ("reason", _startupFailure));
+            return;
         }
+        if (_probe is not { } probe)
+        {
+            _status.Text = Loc.T("app.status.starting");
+            return;
+        }
+
+#if IOS || MACCATALYST
+        string detail = probe.GpuName ?? Loc.T("app.status.noMetalDevice");
+#else
+        string detail = probe.Reason;
+#endif
+#if IOS
+        _status.Text = probe.MainProgramHandleResolved
+            ? Loc.T("app.status.engineLinked", ("backend", probe.Backend), ("detail", detail), ("port", _host.Port))
+            : Loc.T("app.status.engineNotLinked", ("backend", probe.Backend), ("detail", detail), ("port", _host.Port));
+#else
+        _status.Text = probe.NativeLibraryLoaded
+            ? Loc.T("app.status.engineLoaded", ("backend", probe.Backend), ("detail", detail), ("port", _host.Port))
+            : Loc.T("app.status.engineNotLoaded", ("backend", probe.Backend), ("detail", detail), ("port", _host.Port));
+#endif
     }
 }

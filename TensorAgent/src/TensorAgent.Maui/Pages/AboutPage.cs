@@ -8,6 +8,7 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+using TensorAgent.Core.Localization;
 using TensorAgent.Maui.Hosting;
 
 namespace TensorAgent.Maui.Pages;
@@ -24,10 +25,31 @@ namespace TensorAgent.Maui.Pages;
 /// </summary>
 public sealed class AboutPage : ContentPage
 {
+    private readonly LoopbackWebHost _host;
+
     public AboutPage(LoopbackWebHost host)
     {
-        Title = "About";
+        _host = host;
         BackgroundColor = Theme.Background;
+        Build();
+
+        // Nothing here but text, so a new language builds the page again.
+        Loc.Changed += () => Dispatcher.Dispatch(() =>
+        {
+            try
+            {
+                Build();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("TensorAgent: the about screen failed to repaint in the new language: " + ex);
+            }
+        });
+    }
+
+    private void Build()
+    {
+        Title = Loc.T("about.title");
 
         var stack = new VerticalStackLayout { Spacing = 0, Padding = new Thickness(20, 16, 20, 32) };
 
@@ -60,31 +82,19 @@ public sealed class AboutPage : ContentPage
         });
         stack.Add(new Label
         {
-            Text = "A private AI assistant that runs entirely on this device.",
+            Text = Loc.T("about.tagline"),
             FontSize = 15,
             TextColor = Theme.Muted,
             Margin = new Thickness(0, 4, 0, 18),
         });
 
-        stack.Add(Section("Everything happens here",
-            "The model runs on this iPhone's GPU. Your conversations, the files you attach and "
-            + "anything the assistant writes stay in this app's own storage. Nothing is sent to a "
-            + "server to be answered, and the app works with the network switched off."));
+        stack.Add(Section(Loc.T("about.private.heading"), Loc.T("about.private.body")));
 
-        stack.Add(Section("What it can do",
-            "Chat, and read what you give it — pictures, audio, video and documents. It can write "
-            + "and run code in a sandbox, use Agent Skills to produce real PDFs, spreadsheets, Word "
-            + "documents and slide decks, and search the web when you allow it."));
+        stack.Add(Section(Loc.T("about.abilities.heading"), Loc.T("about.abilities.body")));
 
-        stack.Add(Section("You decide what it may do",
-            "Running code and reaching the network are separate switches in Settings, both off "
-            + "until you turn them on. Code runs confined to the current chat's own folder, and "
-            + "when the network is off it is off for the assistant's code too."));
+        stack.Add(Section(Loc.T("about.control.heading"), Loc.T("about.control.body")));
 
-        stack.Add(Section("Built on TensorSharp",
-            "TensorAgent is built on TensorSharp, an open-source .NET engine for running large "
-            + "language and diffusion models, with a Metal backend for Apple GPUs. It is the same "
-            + "engine that powers TensorSharp.Server on the desktop."));
+        stack.Add(Section(Loc.T("about.builtOn.heading"), Loc.T("about.builtOn.body")));
 
         var link = new Label
         {
@@ -105,7 +115,7 @@ public sealed class AboutPage : ContentPage
 
         stack.Add(new Label
         {
-            Text = Build(host),
+            Text = Engine(_host),
             FontSize = 12,
             TextColor = Theme.Muted,
             LineBreakMode = LineBreakMode.WordWrap,
@@ -129,7 +139,7 @@ public sealed class AboutPage : ContentPage
     /// The engine line the app already computes for its own diagnostics. It belongs on
     /// this page too: when something is wrong, this is the text a user can read out.
     /// </summary>
-    private static string Build(LoopbackWebHost host)
+    private static string Engine(LoopbackWebHost host)
     {
         try
         {
@@ -137,7 +147,7 @@ public sealed class AboutPage : ContentPage
         }
         catch (Exception ex)
         {
-            return "Engine details unavailable: " + ex.Message;
+            return Loc.T("about.engine.unavailable", ("error", ex.Message));
         }
     }
 }

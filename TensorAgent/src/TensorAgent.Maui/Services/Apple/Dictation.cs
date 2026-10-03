@@ -11,6 +11,7 @@
 using AVFoundation;
 using Foundation;
 using Speech;
+using TensorAgent.Core.Localization;
 
 namespace TensorAgent.Maui.Services;
 
@@ -49,7 +50,7 @@ internal sealed class Dictation : IDisposable
     public static bool IsSupported => new SFSpeechRecognizer(ResolveLocale(string.Empty)) is { Available: true };
 
     /// <summary>What the page says when <see cref="IsSupported"/> is false.</summary>
-    public const string UnsupportedMessage = "Speech recognition is not available on this device.";
+    public static string UnsupportedMessage => Loc.T("app.dictation.unsupported");
 
     /// <summary>
     /// The locale to recognise in: the caller's explicit choice, or — for "Auto" — the
@@ -159,33 +160,31 @@ internal sealed class Dictation : IDisposable
         if (SFSpeechRecognizer.AuthorizationStatus is SFSpeechRecognizerAuthorizationStatus.Denied
             or SFSpeechRecognizerAuthorizationStatus.Restricted)
         {
-            return "Speech recognition is turned off for TensorAgent. Turn it on in "
-                + SettingsPath("Speech Recognition") + ". " + DeniedMarker;
+            return TurnedOff(microphone: false) + " " + DeniedMarker;
         }
 
         var speech = new TaskCompletionSource<SFSpeechRecognizerAuthorizationStatus>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         SFSpeechRecognizer.RequestAuthorization(speech.SetResult);
         if (await speech.Task != SFSpeechRecognizerAuthorizationStatus.Authorized)
-            return "Dictation needs permission to use speech recognition. " + DeniedMarker;
+            return Loc.T("app.dictation.speechNeeded") + " " + DeniedMarker;
 
         if (AVAudioApplication.SharedInstance.RecordPermission == AVAudioApplicationRecordPermission.Denied)
         {
-            return "The microphone is turned off for TensorAgent. Turn it on in "
-                + SettingsPath("Microphone") + ". " + DeniedMarker;
+            return TurnedOff(microphone: true) + " " + DeniedMarker;
         }
 
         var microphone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         AVAudioApplication.RequestRecordPermission(microphone.SetResult);
-        return await microphone.Task ? null : "Dictation needs permission to use the microphone. " + DeniedMarker;
+        return await microphone.Task ? null : Loc.T("app.dictation.microphoneNeeded") + " " + DeniedMarker;
     }
 
-    /// <summary>Where the user turns a refused permission back on, on this platform.</summary>
-    private static string SettingsPath(string permission) =>
+    /// <summary>A refused permission, and where the user turns it back on, on this platform.</summary>
+    private static string TurnedOff(bool microphone) =>
 #if MACCATALYST
-        "System Settings › Privacy & Security › " + permission;
+        microphone ? Loc.T("app.dictation.microphoneOffMac") : Loc.T("app.dictation.speechOffMac");
 #else
-        "Settings › TensorAgent › " + permission;
+        microphone ? Loc.T("app.dictation.microphoneOff") : Loc.T("app.dictation.speechOff");
 #endif
 
     /// <summary>
@@ -203,15 +202,15 @@ internal sealed class Dictation : IDisposable
             + (_language.Length == 0 ? " (auto)" : string.Empty));
         _recognizer = new SFSpeechRecognizer(locale)
             ?? throw new InvalidOperationException(
-                $"This device has no speech recogniser for {locale.Identifier}.");
+                Loc.T("app.dictation.noRecognizer", ("locale", locale.Identifier)));
         if (!_recognizer.Available)
-            throw new InvalidOperationException("The speech recogniser is not available right now.");
+            throw new InvalidOperationException(Loc.T("app.dictation.recognizerUnavailable"));
 
         var session = AVAudioSession.SharedInstance();
         session.SetCategory(AVAudioSessionCategory.Record, AVAudioSessionCategoryOptions.DuckOthers);
         session.SetActive(true, AVAudioSessionSetActiveOptions.NotifyOthersOnDeactivation, out NSError? sessionError);
         if (sessionError is not null)
-            throw new InvalidOperationException("The microphone could not be started: " + sessionError.LocalizedDescription);
+            throw new InvalidOperationException(Loc.T("app.dictation.microphoneFailed", ("reason", sessionError.LocalizedDescription)));
 
         _request = new SFSpeechAudioBufferRecognitionRequest
         {
@@ -228,7 +227,7 @@ internal sealed class Dictation : IDisposable
         _engine.Prepare();
         _engine.StartAndReturnError(out NSError? engineError);
         if (engineError is not null)
-            throw new InvalidOperationException("The microphone could not be started: " + engineError.LocalizedDescription);
+            throw new InvalidOperationException(Loc.T("app.dictation.microphoneFailed", ("reason", engineError.LocalizedDescription)));
 
         _task = _recognizer.GetRecognitionTask(_request, (result, error) =>
         {

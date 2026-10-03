@@ -1,0 +1,15 @@
+<Project DefaultTargets="GetTensorAgentAppWorkloads">
+  <!-- Run by the dotnet selected for TensorAgent, so the SDK's own workload check
+       uses that installation's manifests rather than the solution SDK's. No restore
+       or app compilation is needed. Only marked lines are consumed by the caller. -->
+  <Target Name="GetTensorAgentAppWorkloads">
+    <MSBuild Projects="$(TensorAgentAppProject)"
+             Targets="GetSuggestedWorkloads"
+             Properties="TargetFramework=$(TargetFramework)">
+      <Output TaskParameter="TargetOutputs" ItemName="_TensorAgentMissingWorkload" />
+    </MSBuild>
+    <Message Importance="high"
+             Condition="'@(_TensorAgentMissingWorkload)' != ''"
+             Text="TENSORAGENT_MISSING_WORKLOAD=%(_TensorAgentMissingWorkload.Identity)" />
+  </Target>
+</Project>

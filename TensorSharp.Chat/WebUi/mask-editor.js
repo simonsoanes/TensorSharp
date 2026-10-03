@@ -3,6 +3,16 @@
   'use strict';
   var active = false;
 
+  // TensorAgent's page answers window.TensorSharpI18n with its own translations; the
+  // server's page has none, so every string here carries its English with it.
+  function tr(key, fallback, params) {
+    var i18n = window.TensorSharpI18n;
+    if (i18n && typeof i18n.t === 'function') return i18n.t(key, fallback, params);
+    return String(fallback).replace(/\{([A-Za-z0-9_]+)\}/g, function (m, name) {
+      return params && Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : m;
+    });
+  }
+
   function node(tag, className, text) {
     var element = document.createElement(tag);
     if (className) element.className = className;
@@ -13,19 +23,19 @@
   // Returned PNGs are opaque grayscale: white edits, black preserves. The drawing
   // canvas uses alpha internally so the original remains visible beneath the brush.
   function open(options) {
-    if (active) return Promise.reject(new Error('An image selection is already open.'));
+    if (active) return Promise.reject(new Error(tr('mask.error.alreadyOpen', 'An image selection is already open.')));
     active = true;
     return new Promise(function (resolve, reject) {
       var previousFocus = document.activeElement;
       var root = node('div', 'ts-mask-modal');
       root.setAttribute('role', 'dialog');
       root.setAttribute('aria-modal', 'true');
-      root.setAttribute('aria-label', 'Select image area to edit');
+      root.setAttribute('aria-label', tr('mask.dialog.label', 'Select image area to edit'));
       var panel = node('div', 'ts-mask-panel');
       root.appendChild(panel);
-      var title = node('h2', '', 'Select area to edit');
+      var title = node('h2', '', tr('mask.dialog.title', 'Select area to edit'));
       panel.appendChild(title);
-      panel.appendChild(node('p', 'ts-mask-help', 'Paint the area to change. Everything outside the selection stays unchanged. Zoom in for small details.'));
+      panel.appendChild(node('p', 'ts-mask-help', tr('mask.dialog.help', 'Paint the area to change. Everything outside the selection stays unchanged. Zoom in for small details.')));
       var toolbar = node('div', 'ts-mask-toolbar');
       panel.appendChild(toolbar);
       function button(label, handler, className) {
@@ -35,9 +45,9 @@
       }
       var erase = false, ready = false, saving = false, pointer = null, currentStroke = null;
       var operations = [], redoOperations = [], scale = 1, fit = 1, pan = false, panStart = null, resizeObserver = null;
-      var paintButton = button('Paint', function () { setErase(false); });
-      var eraseButton = button('Erase', function () { setErase(true); });
-      var panButton = button('Pan', function () { pan = true; updateTools(); });
+      var paintButton = button(tr('mask.tool.paint', 'Paint'), function () { setErase(false); });
+      var eraseButton = button(tr('mask.tool.erase', 'Erase'), function () { setErase(true); });
+      var panButton = button(tr('mask.tool.pan', 'Pan'), function () { pan = true; updateTools(); });
       function setErase(value) {
         erase = value; pan = false; updateTools();
       }
@@ -57,43 +67,43 @@
         label.appendChild(input); label.appendChild(output); toolbar.appendChild(label);
         return input;
       }
-      var brush = range('Brush (image pixels)', 1, 256, 32);
-      var zoom = range('Zoom (%)', 25, 1600, 100, 25);
-      var undo = button('Undo', function () {
+      var brush = range(tr('mask.tool.brush', 'Brush (image pixels)'), 1, 256, 32);
+      var zoom = range(tr('mask.tool.zoom', 'Zoom (%)'), 25, 1600, 100, 25);
+      var undo = button(tr('mask.tool.undo', 'Undo'), function () {
         if (!ready || saving || pointer !== null) return;
         if (operations.length) redoOperations.push(operations.pop()); redraw();
       });
-      var redo = button('Redo', function () {
+      var redo = button(tr('mask.tool.redo', 'Redo'), function () {
         if (!ready || saving || pointer !== null) return;
         if (redoOperations.length) operations.push(redoOperations.pop()); redraw();
       });
-      button('Clear', function () {
+      button(tr('mask.tool.clear', 'Clear'), function () {
         if (!ready || saving || pointer !== null) return;
         redoOperations = []; operations.push({ clear: true }); redraw();
       });
-      button('Invert', function () {
+      button(tr('mask.tool.invert', 'Invert'), function () {
         if (!ready || saving || pointer !== null) return;
         redoOperations = []; operations.push({ invert: true }); redraw();
       });
 
       var viewport = node('div', 'ts-mask-viewport');
-      viewport.setAttribute('aria-label', 'Image selection canvas; scroll to pan when zoomed');
+      viewport.setAttribute('aria-label', tr('mask.canvas.viewport', 'Image selection canvas; scroll to pan when zoomed'));
       var stage = node('div', 'ts-mask-stage');
-      var source = node('img', 'ts-mask-source'); source.alt = 'Image to edit'; source.draggable = false;
+      var source = node('img', 'ts-mask-source'); source.alt = tr('mask.canvas.image', 'Image to edit'); source.draggable = false;
       var canvas = node('canvas', 'ts-mask-canvas');
-      canvas.setAttribute('aria-label', 'Paint or erase the selected image area');
+      canvas.setAttribute('aria-label', tr('mask.canvas.paint', 'Paint or erase the selected image area'));
       stage.appendChild(source); stage.appendChild(canvas); viewport.appendChild(stage); panel.appendChild(viewport);
       var context = canvas.getContext('2d');
       var base = document.createElement('canvas');
-      var status = node('p', 'ts-mask-status', 'Loading image…'); status.setAttribute('role', 'status');
+      var status = node('p', 'ts-mask-status', tr('mask.status.loading', 'Loading image…')); status.setAttribute('role', 'status');
       panel.appendChild(status);
       var settings = node('div', 'ts-mask-options');
-      var featherLabel = node('label', '', 'Soften inside edge (pixels) ');
+      var featherLabel = node('label', '', tr('mask.options.feather', 'Soften inside edge (pixels)') + ' ');
       var feather = node('input'); feather.type = 'number'; feather.min = 0; feather.max = 64; feather.step = 1;
       feather.value = options.maskFeather || 0;
       featherLabel.appendChild(feather); settings.appendChild(featherLabel);
       var cropLabel = node('label'); var crop = node('input'); crop.type = 'checkbox'; crop.checked = !!options.maskCrop;
-      cropLabel.appendChild(crop); cropLabel.appendChild(document.createTextNode(' Process selected region only (faster; less surrounding context)'));
+      cropLabel.appendChild(crop); cropLabel.appendChild(document.createTextNode(' ' + tr('mask.options.crop', 'Process selected region only (faster; less surrounding context)')));
       settings.appendChild(cropLabel); panel.appendChild(settings);
       var actions = node('div', 'ts-mask-actions'); panel.appendChild(actions);
       function action(label, handler, className) {
@@ -108,9 +118,9 @@
         if (previousFocus && previousFocus.focus) previousFocus.focus();
         if (error) reject(error); else resolve(value);
       }
-      var cancel = action('Cancel', function () { if (!saving) finish(null); });
-      if (options.maskUrl) action('Remove selection', function () { if (!saving) finish({ remove: true }); });
-      var apply = action('Use selection', save, 'ts-mask-primary'); apply.disabled = true;
+      var cancel = action(tr('mask.action.cancel', 'Cancel'), function () { if (!saving) finish(null); });
+      if (options.maskUrl) action(tr('mask.action.remove', 'Remove selection'), function () { if (!saving) finish({ remove: true }); });
+      var apply = action(tr('mask.action.use', 'Use selection'), save, 'ts-mask-primary'); apply.disabled = true;
       function keydown(event) {
         if (event.key === 'Escape') {
           event.preventDefault(); event.stopPropagation();
@@ -219,7 +229,7 @@
       function save() {
         if (!ready || saving || pointer !== null) return;
         var radius = Number(feather.value);
-        if (!Number.isInteger(radius) || radius < 0 || radius > 64) { status.textContent = 'Edge softness must be a whole number from 0 to 64.'; return; }
+        if (!Number.isInteger(radius) || radius < 0 || radius > 64) { status.textContent = tr('mask.status.featherRange', 'Edge softness must be a whole number from 0 to 64.'); return; }
         var pixels = context.getImageData(0, 0, canvas.width, canvas.height);
         var selected = false;
         for (var i = 0; i < pixels.data.length; i += 4) {
@@ -227,25 +237,26 @@
           if (alpha) selected = true;
           pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = alpha; pixels.data[i + 3] = 255;
         }
-        if (!selected) { status.textContent = 'Paint an area before using the selection.'; return; }
-        saving = true; apply.disabled = cancel.disabled = true; status.textContent = 'Preparing selection…';
+        if (!selected) { status.textContent = tr('mask.status.nothingPainted', 'Paint an area before using the selection.'); return; }
+        saving = true; apply.disabled = cancel.disabled = true; status.textContent = tr('mask.status.preparing', 'Preparing selection…');
         var output = document.createElement('canvas'); output.width = canvas.width; output.height = canvas.height;
         output.getContext('2d').putImageData(pixels, 0, 0);
         output.toBlob(function (blob) {
           output.width = 0;
-          if (!blob) { saving = false; apply.disabled = cancel.disabled = false; status.textContent = 'Could not save the selection. Please try again.'; return; }
+          if (!blob) { saving = false; apply.disabled = cancel.disabled = false; status.textContent = tr('mask.status.saveFailed', 'Could not save the selection. Please try again.'); return; }
           finish({ blob: blob, maskFeather: radius, maskCrop: crop.checked });
         }, 'image/png');
       }
       function loaded() {
         ready = true; apply.disabled = false; undo.disabled = redo.disabled = true;
-        status.textContent = canvas.width + ' × ' + canvas.height + ' · Pink marks the area to edit. Drag a scrollbar to pan when zoomed.';
+        status.textContent = tr('mask.status.ready', '{width} × {height} · Pink marks the area to edit. Drag a scrollbar to pan when zoomed.',
+          { width: canvas.width, height: canvas.height });
       }
       source.onload = function () {
         if (!root.parentNode) return;
         var w = source.naturalWidth, h = source.naturalHeight;
         if (!w || !h || w > 8192 || h > 8192 || w * h > 16777216) {
-          finish(null, new Error('The selection editor supports images up to 16 megapixels and 8192 pixels per side.')); return;
+          finish(null, new Error(tr('mask.error.tooLarge', 'The selection editor supports images up to 16 megapixels and 8192 pixels per side.'))); return;
         }
         canvas.width = base.width = w; canvas.height = base.height = h;
         refit();
@@ -253,7 +264,7 @@
         var mask = new Image();
         mask.onload = function () {
           if (!root.parentNode) return;
-          if (mask.naturalWidth !== w || mask.naturalHeight !== h) { finish(null, new Error('The saved selection does not match the image dimensions.')); return; }
+          if (mask.naturalWidth !== w || mask.naturalHeight !== h) { finish(null, new Error(tr('mask.error.maskSize', 'The saved selection does not match the image dimensions.'))); return; }
           var baseContext = base.getContext('2d'); baseContext.drawImage(mask, 0, 0);
           var pixels = baseContext.getImageData(0, 0, w, h);
           for (var i = 0; i < pixels.data.length; i += 4) {
@@ -264,10 +275,10 @@
           }
           baseContext.putImageData(pixels, 0, 0); redraw(); loaded();
         };
-        mask.onerror = function () { if (root.parentNode) finish(null, new Error('The saved selection could not be opened.')); };
+        mask.onerror = function () { if (root.parentNode) finish(null, new Error(tr('mask.error.maskUnreadable', 'The saved selection could not be opened.'))); };
         mask.src = options.maskUrl;
       };
-      source.onerror = function () { if (root.parentNode) finish(null, new Error('The image could not be opened for selection.')); };
+      source.onerror = function () { if (root.parentNode) finish(null, new Error(tr('mask.error.imageUnreadable', 'The image could not be opened for selection.'))); };
       source.src = options.sourceUrl;
     });
   }

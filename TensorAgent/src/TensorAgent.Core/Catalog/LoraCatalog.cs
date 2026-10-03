@@ -37,6 +37,9 @@ public sealed record LoraFile(string FileName, string Url, long Bytes, string Sh
 /// </summary>
 public sealed record CatalogLora
 {
+    private readonly string _purpose = string.Empty;
+    private readonly string _license = string.Empty;
+
     /// <summary>Stable id, also the plug-in's folder name and the stem of the engine's own
     /// config for it in <c>config/lora/</c>.</summary>
     public required string Id { get; init; }
@@ -59,9 +62,11 @@ public sealed record CatalogLora
     /// <summary>The engine's own config for a plug-in whose third-party config file ships with
     /// it (Fun-Acc's <c>pdd_config.json</c>): the file name in <see cref="Files"/> to pass.</summary>
     public string? ConfigFile { get; init; }
-    /// <summary>What a user gets from it, in a sentence or two.</summary>
-    public required string Purpose { get; init; }
-    /// <summary>A phrase the request should contain for the plug-in to do its job, if any.</summary>
+    /// <summary>What a user gets from it, in a sentence or two, in the interface language
+    /// (see <see cref="CatalogText"/>, as for <see cref="License"/>).</summary>
+    public required string Purpose { get => CatalogText.Read(_purpose); init => _purpose = value; }
+    /// <summary>A phrase the request should contain for the plug-in to do its job, if any. Never
+    /// translated: it is the wording the plug-in was trained on, and the model reads it.</summary>
     public string? Trigger { get; init; }
     /// <summary>True when it only does anything to an attached photo.</summary>
     public bool NeedsPhoto { get; init; }
@@ -73,7 +78,7 @@ public sealed record CatalogLora
     /// It was trained and shown at 40 steps only.
     /// </summary>
     public bool NeedsModelSteps { get; init; }
-    public required string License { get; init; }
+    public required string License { get => CatalogText.Read(_license); init => _license = value; }
 
     public LoraFile Weights => Files[0];
     public long TotalBytes => Files.Sum(f => f.Bytes);
@@ -98,8 +103,8 @@ public static class LoraCatalog
     public const string QwenImage = "qwen-image-2.1-q4km";
 
     /// <summary>The Qwen Research License of the base model and most plug-ins.</summary>
-    private const string QwenResearch = "Qwen Research License (non-commercial)";
-    private const string NoneStated = "No license stated by the author";
+    private const string QwenResearch = "catalog.license.qwenResearch";
+    private const string NoneStated = "catalog.license.noneStated";
 
     private static string Hf(string repo, string commit, string path) =>
         $"https://huggingface.co/{repo}/resolve/{commit}/{path}";
@@ -121,7 +126,7 @@ public static class LoraCatalog
                         "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r128.safetensors"),
                     679_604_800, "bafb91d0047df3f9b8a5a850b0c967f051164314d8aad778dfa34d9c24ec345b"),
             },
-            Purpose = "Pictures and edits in 6 steps instead of 40, close to the full model's quality.",
+            Purpose = "catalog.lora.viggleTurbo.purpose",
             License = QwenResearch,
         },
         new CatalogLora
@@ -139,7 +144,7 @@ public static class LoraCatalog
                         "p_qwen_image_2.1_8step_v0.1.safetensors"),
                     335_606_104, "f0865d68b02511a3a0ed232d9d1aa99cac3a94166f574b38bcbab1a7a297bb15"),
             },
-            Purpose = "Pictures and edits in 8 steps instead of 40.",
+            Purpose = "catalog.lora.pruna8Step.purpose",
             License = QwenResearch,
         },
         new CatalogLora
@@ -157,7 +162,7 @@ public static class LoraCatalog
                         "p_qwen_image_2.1_5step_v0.1.safetensors"),
                     335_606_144, "021a6228a0fcd217275190b89072416a2f28548e8e18fe049531dc9b77ef89bd"),
             },
-            Purpose = "Pictures and edits in 5 steps: the fastest, with visibly lower quality than 8-step.",
+            Purpose = "catalog.lora.pruna5Step.purpose",
             License = QwenResearch,
         },
         new CatalogLora
@@ -181,7 +186,7 @@ public static class LoraCatalog
                         "models/pdd_config.json"),
                     11_356, "f798c4a8e9225350e9c46be7a60f397df35e6bb90965d64be76d11e51fd41b97"),
             },
-            Purpose = "Pictures and edits in 4 steps. Small text and some edits come out weaker than the full model's.",
+            Purpose = "catalog.lora.funAcc4Step.purpose",
             License = QwenResearch,
         },
         new CatalogLora
@@ -197,7 +202,7 @@ public static class LoraCatalog
                     Hf("Danrisi/filmstills_qwen2.1", "29242138fcc2eea95970fe7b66e6e17c4bb373a8", "filmstills_qwen21.safetensors"),
                     79_743_888, "ad4812903c6f6b8966885d09dff23344422d0d1f8b2bebad038f8a802f55e30a"),
             },
-            Purpose = "The look of a cinematic 35mm film still.",
+            Purpose = "catalog.lora.filmStills.purpose",
             License = QwenResearch,
         },
         new CatalogLora
@@ -213,7 +218,7 @@ public static class LoraCatalog
                     Hf("Danrisi/grainscape_qwen2.1", "bc903faddb7b6106650859c7ddd34610d014ae8e", "grainscape_qwen21.safetensors"),
                     79_743_888, "b04b226561c5c3cc65a8e5f79a63a831ffb068d8bd3f156271650cb46e1dc2bf"),
             },
-            Purpose = "A grainy, high-ISO 35mm colour-negative film look.",
+            Purpose = "catalog.lora.grainscape.purpose",
             License = QwenResearch,
         },
         new CatalogLora
@@ -228,8 +233,7 @@ public static class LoraCatalog
                     Hf("e-n-v-y/Qwen-Image-2.1-Fix", "5b2c7be6ced92cc2e09f9309ad00567b3a3bb6ce", "qwen-image-2.1-fix-1.0-comfy.safetensors"),
                     111_612_000, "e4a369158b957aee3a8316d94dbe00c98f7d648ef3d1926ccf7283915b6db60c"),
             },
-            Purpose = "A DoRA its author made to correct the model's common flaws. It was tuned for a "
-                + "different sampler than the app's, so judge it on your own pictures.",
+            Purpose = "catalog.lora.qualityFix.purpose",
             License = NoneStated,
         },
         new CatalogLora
@@ -247,7 +251,7 @@ public static class LoraCatalog
                         "elusarcas-qwen2-1-detailer-v1.safetensors"),
                     79_744_352, "c1298f51eb090473f924314475952710a2f0322f1df65c0290f3e14997244f96"),
             },
-            Purpose = "Finer detail and cleaner textures for an attached picture, keeping its composition.",
+            Purpose = "catalog.lora.detailEnhancer.purpose",
             License = NoneStated,
         },
         new CatalogLora
@@ -265,7 +269,7 @@ public static class LoraCatalog
                         "Qwen-Image-2.1-Natural-Exposure-LoRA-4000.safetensors"),
                     83_943_952, "a8edea397ce55ae6e1a442f3ba963eb78beeb515d4fe7d217d496542317292b1"),
             },
-            Purpose = "Corrects an attached photo's exposure to a balanced, neutral one.",
+            Purpose = "catalog.lora.naturalExposure.purpose",
             License = QwenResearch,
         },
         new CatalogLora
@@ -284,8 +288,7 @@ public static class LoraCatalog
                         "Qwen-Image-2.1-Object-Remover-Bbox-turbo-4000.safetensors"),
                     83_943_952, "7035eba6f25cdbd0c780027372710c9bebebdd814baaa79d48ce9d5ca80d6449"),
             },
-            Purpose = "Removes what is inside red boxes drawn on an attached photo and fills in the background. "
-                + "It does not manage every photo, so check the result.",
+            Purpose = "catalog.lora.objectRemover.purpose",
             License = QwenResearch,
         },
         new CatalogLora
@@ -303,7 +306,7 @@ public static class LoraCatalog
                         "Qwen-Image-2.1-Object-Mover-Bbox-Preview-5000.safetensors"),
                     83_944_000, "b596b5c81ea254b22acecc1801f24f3b42700c954f7ac7a333f644d217c32dcd"),
             },
-            Purpose = "Moves the object in one red box drawn on an attached photo to the spot marked by a second red box.",
+            Purpose = "catalog.lora.objectMover.purpose",
             License = QwenResearch,
         },
         new CatalogLora
@@ -321,8 +324,7 @@ public static class LoraCatalog
                         "Qwen2.1_Anime_consistency.safetensors"),
                     167_830_408, "0c171eb802ea8051b511f2d93c1743eeadd030316255aa98fa65d40809366752"),
             },
-            Purpose = "Keeps an anime character the same when an attached picture is edited into a new pose, "
-                + "view or expression. Experimental.",
+            Purpose = "catalog.lora.animeConsistency.purpose",
             License = "Apache-2.0",
         },
     };

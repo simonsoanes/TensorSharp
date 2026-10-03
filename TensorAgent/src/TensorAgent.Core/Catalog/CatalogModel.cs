@@ -8,7 +8,29 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+using System.Diagnostics.CodeAnalysis;
+using TensorAgent.Core.Localization;
+
 namespace TensorAgent.Core.Catalog;
+
+/// <summary>
+/// A catalog entry's words in the language the interface is shown in.
+///
+/// <para>
+/// An entry names its text by a key of the catalog table (<c>Localization/en/catalog.json</c>)
+/// rather than holding it, and the member that returns the text looks the key up each time it
+/// is read, so a list built after the user switches language reads in the new one. A value that
+/// is not a key -- a size such as "12B", a license id such as "Apache-2.0" -- reads as written.
+/// </para>
+/// </summary>
+internal static class CatalogText
+{
+    private const string KeyPrefix = "catalog.";
+
+    [return: NotNullIfNotNull(nameof(value))]
+    public static string? Read(string? value) =>
+        value is not null && value.StartsWith(KeyPrefix, StringComparison.Ordinal) ? Loc.T(value) : value;
+}
 
 /// <summary>What a file in a catalog entry is for. The app loads the weights and hands the
 /// companions to the engine by role (the projector to <c>--mmproj</c>, a diffusion model's
@@ -93,13 +115,19 @@ public sealed record CatalogSampling(float Temperature, int TopK, float TopP, fl
 /// </summary>
 public sealed record CatalogModel
 {
+    private readonly string _parameters = string.Empty;
+    private readonly string _quantization = string.Empty;
+    private readonly string? _notes;
+    private readonly string _license = string.Empty;
+
     public required string Id { get; init; }
     public required string DisplayName { get; init; }
     public required CatalogFamily Family { get; init; }
     public required CatalogArchitectureKind Kind { get; init; }
-    /// <summary>Human-readable parameter count, e.g. "4B effective" or "26B (4B active)".</summary>
-    public required string Parameters { get; init; }
-    public required string Quantization { get; init; }
+    /// <summary>Human-readable parameter count, e.g. "4B effective" or "26B (4B active)",
+    /// in the interface language (see <see cref="CatalogText"/>, as for the other text members).</summary>
+    public required string Parameters { get => CatalogText.Read(_parameters); init => _parameters = value; }
+    public required string Quantization { get => CatalogText.Read(_quantization); init => _quantization = value; }
     public required IReadOnlyList<CatalogFile> Files { get; init; }
     public required CatalogModalities Modalities { get; init; }
     /// <summary>Smallest device memory class this entry is offered on. Weights are wired by
@@ -133,8 +161,8 @@ public sealed record CatalogModel
     /// <summary>Marked in the UI: fits only with reduced context or has not been validated on
     /// a phone yet.</summary>
     public bool Experimental { get; init; }
-    public string? Notes { get; init; }
-    public required string License { get; init; }
+    public string? Notes { get => CatalogText.Read(_notes); init => _notes = value; }
+    public required string License { get => CatalogText.Read(_license); init => _license = value; }
     /// <summary>
     /// Bytes of the weights the engine reads from the SSD on demand instead of holding them
     /// resident: zero for every entry whose weights a token reads in full. Qwen3.8 Flash Next
