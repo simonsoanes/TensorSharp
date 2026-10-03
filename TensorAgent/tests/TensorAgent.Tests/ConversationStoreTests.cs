@@ -35,6 +35,7 @@ public sealed class ConversationStoreTests : IDisposable
         Assert.Equal("abc.md", first.GetProperty("textFilePaths")[0].GetString());
         Assert.Equal("notes.md", first.GetProperty("textFileNames")[0].GetString());
         Assert.False(first.TryGetProperty("audioPaths", out _));   // nulls are omitted, like the page's payload
+        Assert.False(first.TryGetProperty("stats", out _));
 
         Conversation? loaded = store.Load(c.Id);
         Assert.NotNull(loaded);
@@ -49,6 +50,38 @@ public sealed class ConversationStoreTests : IDisposable
         var refs = store.ReferencedUploads();
         Assert.Contains("abc.md", refs);
         Assert.Contains("img1.png", refs);
+    }
+
+    [Fact]
+    public void TheNextRequestPreservesThePreviousAnswersStats()
+    {
+        var store = new ConversationStore(_dir);
+        Conversation conversation = store.Create();
+        var recorder = new ConversationRecorder(store);
+        recorder.Bind("session-stats", conversation.Id);
+
+        recorder.Complete("session-stats", "Done.", stats: new StoredTurnStats
+        {
+            TokenCount = 1200, Elapsed = 42.25, TokensPerSecond = 100.5,
+            PromptTokens = 2000, KvReusedTokens = 1500, KvReusePercent = 75,
+            Truncated = true,
+        });
+        Conversation prior = Assert.IsType<Conversation>(new ConversationStore(_dir).Load(conversation.Id));
+        prior.Messages.Add(new StoredMessage { Role = "user", Content = "Continue." });
+
+        // The page carries the saved counters in its history array. Record replaces
+        // that array wholesale, so the new optional field must survive deserialization.
+        recorder.Record("session-stats", JsonSerializer.SerializeToElement(new { messages = prior.Messages }));
+        StoredMessage assistant = Assert.Single(new ConversationStore(_dir).Load(conversation.Id)!.Messages,
+            message => message.Role == "assistant");
+        StoredTurnStats stats = Assert.IsType<StoredTurnStats>(assistant.Stats);
+        Assert.Equal(1200, stats.TokenCount);
+        Assert.Equal(42.25, stats.Elapsed);
+        Assert.Equal(100.5, stats.TokensPerSecond);
+        Assert.Equal(2000, stats.PromptTokens);
+        Assert.Equal(1500, stats.KvReusedTokens);
+        Assert.Equal(75.0, stats.KvReusePercent);
+        Assert.True(stats.Truncated);
     }
 
     [Fact]

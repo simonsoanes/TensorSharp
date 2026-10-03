@@ -242,6 +242,10 @@ public sealed class WebUiRoutesTests : IDisposable
         Assert.Equal("assistant", answer.Role);
         Assert.Equal("It is 4.", answer.Content);
         Assert.Equal("adding them", answer.Thinking);
+        StoredTurnStats stats = Assert.IsType<StoredTurnStats>(answer.Stats);
+        Assert.Equal(2, stats.TokenCount);
+        Assert.Equal(1.5, stats.Elapsed);
+        Assert.Equal(8.0, stats.TokensPerSecond);
 
         // Shaped like the frames the chat service produces: the session id arrives only
         // on the last one, and it is what tells the wrapper where to file the answer.
@@ -252,7 +256,11 @@ public sealed class WebUiRoutesTests : IDisposable
             yield return new { token = "It is " };
             await Task.Yield();
             yield return new { token = "4." };
-            yield return new { done = true, tokenCount = 2, aborted = false, error = (string?)null, sessionId };
+            yield return new
+            {
+                done = true, tokenCount = 2, elapsed = 1.5, tokPerSec = 8.0,
+                aborted = false, error = (string?)null, sessionId,
+            };
         }
     }
 

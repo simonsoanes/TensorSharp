@@ -442,8 +442,48 @@
     // The files this turn produced, put back the way the live turn showed them.
     // They are the point of the turn far more often than the prose is.
     if (extra && extra.artifacts) extra.artifacts.forEach(function (f) { fileLine({ turn: turn, bubble: b }, f); });
+    var view = { turn: turn, bubble: b };
+    if (role === 'assistant' && extra && extra.stats) showTurnStats(view, extra.stats);
     if (stickBottom) toBottom();
-    return { turn: turn, bubble: b };
+    return view;
+  }
+
+  // These are the engine's terminal counters, including reasoning and tool-call
+  // generations. Counting the answer fragments here would under-report both tokens
+  // and decode speed. Older transcripts and synthetic error frames have no counters.
+  function statsOf(s) {
+    function number(n) { return typeof n === 'number' && isFinite(n) && n >= 0; }
+    function count(n) { return number(n) && Math.floor(n) === n && n <= 2147483647; }
+    if (!s || !count(s.tokenCount) || !number(s.elapsed) || !number(s.tokPerSec)) return null;
+    var stats = { tokenCount: s.tokenCount, elapsed: s.elapsed, tokPerSec: s.tokPerSec };
+    ['promptTokens', 'kvReusedTokens'].forEach(function (key) {
+      if (count(s[key])) stats[key] = s[key];
+    });
+    if (number(s.kvReusePercent)) stats.kvReusePercent = s.kvReusePercent;
+    if (s.aborted === true) stats.aborted = true;
+    if (s.truncated === true) stats.truncated = true;
+    return stats;
+  }
+
+  function showTurnStats(view, value) {
+    var stats = statsOf(value);
+    if (!stats) return;
+    var line = t('page.turn.stats', {
+      tokens: stats.tokenCount, seconds: stats.elapsed.toFixed(1), speed: stats.tokPerSec.toFixed(1),
+    });
+    if (stats.promptTokens > 0) {
+      var reused = stats.kvReusedTokens || 0;
+      var percent = typeof stats.kvReusePercent === 'number'
+        ? stats.kvReusePercent : 100 * reused / stats.promptTokens;
+      line += ' · ' + t('page.turn.kvStats', { reused: reused, prompt: stats.promptTokens, percent: percent.toFixed(0) });
+    }
+    if (stats.truncated) line += ' · ' + t('page.turn.truncated');
+    if (stats.aborted) line += ' · ' + t('page.turn.aborted');
+    if (!view.stats || view.stats.parentNode !== view.turn) {
+      view.stats = el('div', 'turn-stats');
+      view.turn.appendChild(view.stats);
+    }
+    view.stats.textContent = line;
   }
 
   // What the assistant is doing, and what it did.
@@ -866,7 +906,7 @@
     (messages || []).forEach(function (m) {
       state.history.push(m);
       addTurn(m.role, displayText(m.content), m.attachments,
-        { artifacts: m.artifacts, imageUrl: m.imageUrl, videoUrl: m.videoUrl, audioUrl: m.audioUrl });
+        { artifacts: m.artifacts, imageUrl: m.imageUrl, videoUrl: m.videoUrl, audioUrl: m.audioUrl, stats: m.stats });
     });
   }
 
@@ -1847,6 +1887,7 @@
     if (live && live.turn.parentNode) {
       live.bubble.innerHTML = '';
       live.answerSoFar = '';
+      if (live.stats) { live.stats.remove(); live.stats = null; }
       Array.prototype.slice.call(live.turn.querySelectorAll('.step, .think, .copy'))
         .forEach(function (n) { n.remove(); });
       live.step = null; live.tool = ''; live.detail = '';
@@ -2012,7 +2053,7 @@
     var reader = res.body.getReader(), dec = new TextDecoder(), buf = '';
     // Whether the host said the turn was over. A stream that ends without it did not
     // end because the answer did: the connection went away underneath it.
-    var terminal = false;
+    var terminal = false, stats = null;
     // Whether this reader has already asked for the turn again after an EOF that
     // carried no terminal frame; see ended().
     var reattached = false;
@@ -2080,7 +2121,14 @@
         });
     }
     function handle(f) {
-      if (f.done === true) terminal = true;
+      if (f.done === true) {
+        terminal = true;
+        stats = statsOf(f);
+        // Image/video generators use zero token counters as protocol placeholders.
+        // A text turn that also produces media still has its real model counters.
+        if (stats && stats.tokenCount === 0 && (madeImage || madeVideo)) stats = null;
+        if (stats) showTurnStats(view, stats);
+      }
       if (f.thinking) {
         thinking += f.thinking;
         if (!thinkBox) {
@@ -2114,6 +2162,8 @@
       // reader can see.
       if (f.restart) {
         thinking = ''; draft = '';
+        stats = null;
+        if (view.stats) { view.stats.remove(); view.stats = null; }
         if (thinkBox) { thinkBox.remove(); thinkBox = null; thinkBody = null; }
         // Said once per restart, not once per READ of it: the host replays every frame
         // from the beginning when this page re-attaches to a running turn, and a
@@ -2245,10 +2295,11 @@
         view.step = null;
       }
       offered = offerNetworkIfRefused(answer + ' ' + steps, offered);
-      // Everything the turn produced, not only its prose. The host writes the same
-      // three things down when the turn ends; the page has to hold them too, because
+      // Everything the turn produced, not only its prose. The host saves it when
+      // the turn ends; the page has to hold it too, because
       // the next request sends this array and the host saves what it is sent.
       var entry = { role: 'assistant', content: answer };
+      if (stats) entry.stats = stats;
       if (thinking) entry.thinking = thinking;
       if (made.length) entry.artifacts = made;
       if (madeImage) {
