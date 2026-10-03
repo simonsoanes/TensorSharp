@@ -9,5 +9,6 @@
   "about.control.body": "코드 실행과 네트워크 접근은 설정에서 별도로 켤 수 있으며, 처음에는 둘 다 꺼져 있습니다. 코드는 현재 채팅의 전용 폴더 안에서만 실행됩니다. 네트워크를 끄면 도우미의 코드도 네트워크에 접근할 수 없습니다.",
   "about.builtOn.heading": "TensorSharp 기반",
   "about.builtOn.body": "TensorAgent는 TensorSharp를 기반으로 만들어졌습니다. TensorSharp는 대규모 언어 모델과 확산 모델을 실행하는 오픈 소스 .NET 엔진으로, Apple GPU용 Metal 백엔드를 제공합니다. 데스크톱의 TensorSharp.Server도 같은 엔진을 사용합니다.",
+  "about.support.caption": "TensorSharp/TensorAgent는 무료입니다. 마음에 드셨다면 커피 한 잔으로 개발을 이어갈 수 있도록 응원해 주세요.",
   "about.engine.unavailable": "엔진 정보를 가져올 수 없습니다: {error}"
 }

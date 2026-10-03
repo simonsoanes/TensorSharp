@@ -1,5 +1,8 @@
 # TensorAgent
 
+<p align="center"><a href="https://buymeacoffee.com/zhongkaifu"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
+<sub>TensorSharp/TensorAgent is free. If you like it, a coffee keeps the work on it going.</sub></p>
+
 A local AI app for **iPhone, iPad, Mac and Windows**. TensorAgent runs TensorSharp
 in the app process for text and reasoning, multimodal questions, agentic code and
 document work, **Qwen-Image 2.1 image generation and editing**, and MiniMax-H3 short

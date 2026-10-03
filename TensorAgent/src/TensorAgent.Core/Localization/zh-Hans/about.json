@@ -9,5 +9,6 @@
   "about.control.body": "运行代码和访问网络是“设置”中的两个独立开关，默认均关闭，直到你主动开启。代码只能在当前聊天的专用文件夹内运行；网络关闭时，助手运行的代码也无法联网。",
   "about.builtOn.heading": "基于 TensorSharp 构建",
   "about.builtOn.body": "TensorAgent 基于 TensorSharp 构建。这是一个用于运行大语言模型和扩散模型的开源 .NET 引擎，提供用于 Apple GPU 的 Metal 后端。桌面端的 TensorSharp.Server 也使用同一引擎。",
+  "about.support.caption": "TensorSharp/TensorAgent 是免费的。如果你喜欢它，请我喝杯咖啡，支持我继续开发。",
   "about.engine.unavailable": "无法获取引擎详情：{error}"
 }

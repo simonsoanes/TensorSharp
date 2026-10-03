@@ -6,6 +6,9 @@
 
 [English](README.md) | [中文](README_zh-cn.md)
 
+<p align="center"><a href="https://buymeacoffee.com/zhongkaifu"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
+<sub>TensorSharp/TensorAgent is free. If you like it, a coffee keeps the work on it going.</sub></p>
+
 **面向 GGUF 模型的原生 .NET AI 推理引擎** —— 支持文本、推理、多模态输入、嵌入、图像生成与编辑，以及带音频的视频生成。可通过 CLI、浏览器聊天、兼容 Ollama/OpenAI 的 API，或运行在 iPhone、iPad、Mac 和 Windows 上的本地应用 [TensorAgent](TensorAgent/README.md) 使用。.NET 运行时提供纯托管 CPU 与原生加速后端；已发布的对比使用相同 GGUF 文件和硬件。可选的 `TensorSharp.AgentHost` 层还提供 Agent Skills、用于文件和 shell 操作的有界进程内“模型→工具”循环，以及有界的自动子智能体委派。
 
 ## 亮点功能

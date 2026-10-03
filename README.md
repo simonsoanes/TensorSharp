@@ -6,6 +6,9 @@
 
 [English](README.md) | [中文](README_zh-cn.md)
 
+<p align="center"><a href="https://buymeacoffee.com/zhongkaifu"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
+<sub>TensorSharp/TensorAgent is free. If you like it, a coffee keeps the work on it going.</sub></p>
+
 **Native .NET AI inference engine for GGUF models** — text, reasoning, multimodal input, embeddings, image generation and editing, and video with audio. Run it from the CLI, browser chat, Ollama/OpenAI-compatible APIs, or [TensorAgent](TensorAgent/README.md), the local app for iPhone, iPad, Mac and Windows. The .NET runtime offers managed CPU and native accelerator backends; published comparisons use identical GGUF files and hardware. The optional `TensorSharp.AgentHost` layer adds Agent Skills, a bounded, in-process model-to-tool loop for file and shell work, and bounded automatic subagent delegation.
 
 ## Highlights

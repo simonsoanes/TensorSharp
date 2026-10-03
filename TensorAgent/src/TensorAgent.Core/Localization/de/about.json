@@ -9,5 +9,6 @@
   "about.control.body": "Codeausführung und Netzwerkzugriff haben eigene Schalter in den Einstellungen; beide sind zunächst aus. Code ist auf den Ordner des aktuellen Chats beschränkt. Wenn das Netzwerk aus ist, gilt das auch für den Code des Assistenten.",
   "about.builtOn.heading": "Auf TensorSharp aufgebaut",
   "about.builtOn.body": "TensorAgent basiert auf TensorSharp, einer quelloffenen .NET-Engine für große Sprach- und Diffusionsmodelle mit einem Metal-Backend für Apple-GPUs. Dieselbe Engine betreibt TensorSharp.Server auf dem Desktop.",
+  "about.support.caption": "TensorSharp/TensorAgent ist kostenlos. Wenn es dir gefällt, hilft ein Kaffee dabei, die Entwicklung fortzusetzen.",
   "about.engine.unavailable": "Engine-Details nicht verfügbar: {error}"
 }

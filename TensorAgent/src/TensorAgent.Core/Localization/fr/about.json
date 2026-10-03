@@ -9,5 +9,6 @@
   "about.control.body": "L’exécution de code et l’accès au réseau ont deux interrupteurs distincts dans les réglages, désactivés tant que vous ne les activez pas. Le code est limité au dossier de la conversation en cours ; quand le réseau est désactivé, le code de l’assistant n’y a pas accès non plus.",
   "about.builtOn.heading": "Conçu avec TensorSharp",
   "about.builtOn.body": "TensorAgent est construit sur TensorSharp, un moteur .NET open source pour les grands modèles de langage et de diffusion, avec un backend Metal pour les GPU Apple. C’est le même moteur que TensorSharp.Server utilise sur ordinateur.",
+  "about.support.caption": "TensorSharp/TensorAgent est gratuit. Si vous l’aimez, un café aide à poursuivre son développement.",
   "about.engine.unavailable": "Détails du moteur indisponibles : {error}"
 }
