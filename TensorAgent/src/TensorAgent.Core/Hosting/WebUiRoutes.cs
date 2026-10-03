@@ -789,6 +789,7 @@ public static partial class WebUiRoutes
         var seen = new HashSet<string>(StringComparer.Ordinal);
         string? sessionId = null;
         string? imageUrl = null, videoUrl = null, audioUrl = null;
+        StoredTurnStats? stats = null;
 
         await foreach (object frame in frames.ConfigureAwait(false))
         {
@@ -799,6 +800,8 @@ public static partial class WebUiRoutes
             // only way to stay honest about what was actually sent.
             using JsonDocument document = JsonDocument.Parse(JsonSerializer.Serialize(frame, SseFraming.JsonOptions));
             JsonElement root = document.RootElement;
+            if (root.TryGetProperty("done", out JsonElement done) && done.ValueKind == JsonValueKind.True)
+                stats = StoredTurnStats.FromDoneFrame(root);
             if (root.TryGetProperty("token", out JsonElement token) && token.GetString() is { } piece)
                 content.Append(piece);
             else if (root.TryGetProperty("replace", out JsonElement replace) && replace.GetString() is { } whole)
@@ -827,7 +830,7 @@ public static partial class WebUiRoutes
         }
 
         if (sessionId is not null)
-            recorder.Complete(sessionId, content.ToString(), thinking.ToString(), artifacts, imageUrl, videoUrl, audioUrl);
+            recorder.Complete(sessionId, content.ToString(), thinking.ToString(), artifacts, imageUrl, videoUrl, audioUrl, stats);
     }
 
     /// <summary>
