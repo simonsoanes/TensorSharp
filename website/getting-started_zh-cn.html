@@ -63,6 +63,7 @@ cd TensorSharp</code></pre>
   <h3>完整原生 / GPU 路径</h3>
   <p>需要 GGML CPU、Metal、CUDA、Vulkan 或 MLX 时构建整个解决方案。首次构建会编译原生桥接，可能需要数分钟；后续为增量构建。</p>
   <pre data-lang="bash"><code>dotnet build TensorSharp.slnx -c Release</code></pre>
+  <p>在 macOS 与 Windows 上，若运行构建的 .NET SDK 具备 .NET MAUI 工作负载，这一步也会构建 TensorAgent 应用，否则给出警告；加上 <code>-p:TensorSharpSkipTensorAgentApp=true</code> 可将应用排除在外（<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/DEVELOPMENT_zh-cn.md#构建整个解决方案" target="_blank" rel="noopener">详情</a>）。</p>
   <p>或只构建其中一个应用：</p>
   <pre data-lang="bash"><code># 控制台应用
 dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release

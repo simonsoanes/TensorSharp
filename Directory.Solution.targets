@@ -1,0 +1,237 @@
+<Project>
+  <!-- Imported by the solution-level (metaproj) build only, so it runs for
+       `dotnet build TensorSharp.slnx` (not for a project build, a -graph build or a
+       Visual Studio solution build, none of which runs the metaproj's Build target).
+
+       TensorAgent's app, TensorAgent/src/TensorAgent.Maui, is built here instead of being
+       listed in TensorSharp.slnx. Its heads (net10.0-ios and net10.0-maccatalyst on a Mac,
+       net10.0-windows10.0.19041.0 on Windows) need the .NET MAUI workloads, which the SDKs
+       on the Linux machines and containers that build this solution do not have; listed as
+       a project, it would fail their restore with NETSDK1147. TensorAgent's
+       platform-neutral projects (TensorAgent.Core, TensorAgent.Sharing, TensorAgent.Tests)
+       are in the solution and build everywhere.
+
+       After the rest of the solution has built, every head this machine can build is built
+       by a child `dotnet build`, the way TensorAgent/scripts build it:
+
+         - A separate process, because -p:TensorSharpAppleTargets=true has to be a global
+           property from restore on: it decides TensorSharp.Models' target frameworks, and
+           restore reads them before a ProjectReference's AdditionalProperties apply. The
+           solution's own projects must not get it, and the child's restore lands in its own
+           directory (Directory.Build.props), so neither build rewrites the other's.
+         - After the solution and on one node (-m:1), because several referenced projects
+           share an output directory and would race on it.
+         - No RuntimeIdentifier for the Apple heads: the iOS SDK's default for `dotnet build`
+           is the simulator of this Mac's architecture, and one passed on the command line
+           would also reach the restore of every referenced project, so the two heads would
+           rewrite each other's restore on every solution build. Without it the head's
+           simulator-only CodesignKey="-" is never set (its condition reads the RID before
+           the SDK supplies the default), so the simulator build gets it here and is ad-hoc
+           signed like build-sim.sh's app; being global, it reaches the share extension too,
+           which build-sim.sh's leaves to whatever team profile the Mac has. The Windows head
+           keeps build-windows.ps1's win-x64 (the engine library is x64 only), at the price of
+           a second restore of its references per build.
+         - Platform=AnyCPU, because Visual Studio's x64 prompts export Platform=x64 into the
+           environment the child inherits (Directory.Solution.props covers only this build),
+           which would move every output under bin/x64/.
+         - TENSORSHARP_MLX_NATIVE_SKIP=true, as the scripts export it: the app never uses MLX.
+         - From this build's command line, the configuration and -p:TensorSharpSkipGgmlNative
+           only.
+
+       A head is skipped with a warning naming what is missing and what provides it when the
+       SDK running this build lacks one of the app's workloads (GetSuggestedWorkloads is the
+       SDK's own check; the head restores every target framework it has on this OS, so a
+       missing one stops all of them), when the iOS simulator app's GgmlOps.xcframework or
+       staged CPython is absent, or when the native build is skipped and a desktop head's
+       engine library is not there. Anything else that stops a head (no Xcode, one the
+       installed workload rejects, a compile or link error) fails the solution build, with
+       the script that builds that head alone. -p:TensorSharpSkipTensorAgentApp=true (or the
+       same name as an environment variable) leaves the app out. Rebuild and Clean of the
+       solution rebuild and clean the app too. -->
+
+  <PropertyGroup Condition="'$(SolutionFileName)' == 'TensorSharp.slnx'">
+    <_TensorAgentAppProject>$(MSBuildThisFileDirectory)TensorAgent/src/TensorAgent.Maui/TensorAgent.Maui.csproj</_TensorAgentAppProject>
+    <_TensorAgentAppBin>$(MSBuildThisFileDirectory)TensorAgent/src/TensorAgent.Maui/bin/$(Configuration)/</_TensorAgentAppBin>
+    <!-- The Mac head's RID follows the SDK's (NETCoreSdkRuntimeIdentifier, this process); the
+         iOS SDK picks its default simulator from the machine's architecture. -->
+    <_TensorAgentAppProcessArch>$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant())</_TensorAgentAppProcessArch>
+    <_TensorAgentAppMachineArch>$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant())</_TensorAgentAppMachineArch>
+    <!-- The child runs on the SDK that answered the workload check: the dotnet that started
+         this build, or else the one this MSBuild belongs to. -->
+    <_TensorAgentDotnet>$(DOTNET_HOST_PATH)</_TensorAgentDotnet>
+    <_TensorAgentDotnet Condition="'$(_TensorAgentDotnet)' == '' And Exists('$(MSBuildBinPath)/../../dotnet')">$([MSBuild]::NormalizePath('$(MSBuildBinPath)/../../dotnet'))</_TensorAgentDotnet>
+    <_TensorAgentDotnet Condition="'$(_TensorAgentDotnet)' == '' And Exists('$(MSBuildBinPath)/../../dotnet.exe')">$([MSBuild]::NormalizePath('$(MSBuildBinPath)/../../dotnet.exe'))</_TensorAgentDotnet>
+    <_TensorAgentDotnet Condition="'$(_TensorAgentDotnet)' == ''">dotnet</_TensorAgentDotnet>
+    <!-- A native build skipped for the solution stays skipped for the app; the desktop heads
+         otherwise bring the engine library up to date themselves. -->
+    <_TensorAgentAppNativeSkipped Condition="'$(TensorSharpSkipGgmlNative)' == 'true' Or '$(TENSORSHARP_GGML_NATIVE_SKIP)' == 'true'">true</_TensorAgentAppNativeSkipped>
+    <_TensorAgentAppEnvironment>TENSORSHARP_MLX_NATIVE_SKIP=true</_TensorAgentAppEnvironment>
+    <_TensorAgentAppEnvironment Condition="'$(TensorSharpSkipGgmlNative)' == 'true'">$(_TensorAgentAppEnvironment);TENSORSHARP_GGML_NATIVE_SKIP=true</_TensorAgentAppEnvironment>
+    <!-- Exec logs each warning and error the child prints, so the child prints each once:
+         `dotnet build` appends -consoleloggerparameters:Summary after its arguments, and the
+         summary repeats them, so its console logger is replaced by one without a summary. -->
+    <_TensorAgentAppArguments>-c &quot;$(Configuration)&quot; -p:Platform=AnyCPU -m:1 -nologo -tl:off -noConsoleLogger &quot;-logger:Microsoft.Build.Logging.ConsoleLogger,Microsoft.Build;Verbosity=minimal;NoSummary&quot;</_TensorAgentAppArguments>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(SolutionFileName)' == 'TensorSharp.slnx' And $([MSBuild]::IsOSPlatform('OSX'))">
+    <!-- Every target framework the head restores here; each needs its workload. -->
+    <_TensorAgentAppTargetFramework Include="net10.0-maccatalyst;net10.0-ios" />
+    <_TensorAgentAppHead Include="net10.0-maccatalyst"
+                         DisplayName="Mac app"
+                         Script="TensorAgent/scripts/build-mac.sh"
+                         Arguments="-p:TensorSharpAppleTargets=true"
+                         App="$(_TensorAgentAppBin)net10.0-maccatalyst/maccatalyst-$(_TensorAgentAppProcessArch)/TensorAgent.app" />
+    <!-- GgmlOps.xcframework's simulator slice is arm64 only. -->
+    <_TensorAgentAppHead Include="net10.0-ios"
+                         Condition="'$(_TensorAgentAppMachineArch)' == 'arm64'"
+                         DisplayName="iOS simulator app"
+                         Script="TensorAgent/scripts/build-sim.sh"
+                         Arguments="-p:TensorSharpAppleTargets=true -p:CodesignKey=-"
+                         App="$(_TensorAgentAppBin)net10.0-ios/iossimulator-arm64/TensorAgent.Maui.app" />
+    <!-- Not in git; TensorAgent/README.md, "Build and run". Checked only where the head is built. -->
+    <_TensorAgentAppPrerequisite Include="$(MSBuildThisFileDirectory)TensorSharp.GGML.Native/build-ios/GgmlOps.xcframework"
+                                 Condition="'$(_TensorAgentAppMachineArch)' == 'arm64'"
+                                 Head="net10.0-ios"
+                                 HeadName="iOS simulator app"
+                                 MadeBy="TensorSharp.GGML.Native/build-ios.sh" />
+    <_TensorAgentAppPrerequisite Include="$(MSBuildThisFileDirectory)TensorAgent/python-runtime/simulator/Frameworks/Python.framework"
+                                 Condition="'$(_TensorAgentAppMachineArch)' == 'arm64'"
+                                 Head="net10.0-ios"
+                                 HeadName="iOS simulator app"
+                                 MadeBy="eng/fetch-python-ios.sh, then TensorAgent/scripts/prepare-python.sh" />
+    <_TensorAgentAppPrerequisite Include="$(MSBuildThisFileDirectory)TensorSharp.GGML.Native/build/libGgmlOps.dylib"
+                                 Condition="'$(_TensorAgentAppNativeSkipped)' == 'true'"
+                                 Head="net10.0-maccatalyst"
+                                 HeadName="Mac app"
+                                 MadeBy="a build without TensorSharpSkipGgmlNative (or TensorSharp.GGML.Native/build-macos.sh)" />
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(SolutionFileName)' == 'TensorSharp.slnx' And $([MSBuild]::IsOSPlatform('Windows'))">
+    <!-- Where TensorAgentShipWindowsEngine looks for the engine library. -->
+    <_TensorAgentWindowsEngine>$(MSBuildThisFileDirectory)TensorSharp.GGML.Native/build-windows/Release/GgmlOps.dll</_TensorAgentWindowsEngine>
+    <_TensorAgentWindowsEngine Condition="!Exists('$(_TensorAgentWindowsEngine)') And Exists('$(MSBuildThisFileDirectory)TensorSharp.GGML.Native/build-windows/GgmlOps.dll')">$(MSBuildThisFileDirectory)TensorSharp.GGML.Native/build-windows/GgmlOps.dll</_TensorAgentWindowsEngine>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(SolutionFileName)' == 'TensorSharp.slnx' And $([MSBuild]::IsOSPlatform('Windows'))">
+    <_TensorAgentAppTargetFramework Include="net10.0-windows10.0.19041.0" />
+    <_TensorAgentAppHead Include="net10.0-windows10.0.19041.0"
+                         DisplayName="Windows app"
+                         Script="TensorAgent/scripts/build-windows.ps1"
+                         Arguments="-r win-x64"
+                         App="$(_TensorAgentAppBin)net10.0-windows10.0.19041.0/win-x64/TensorAgent.Maui.exe" />
+    <_TensorAgentAppPrerequisite Include="$(_TensorAgentWindowsEngine)"
+                                 Condition="'$(_TensorAgentAppNativeSkipped)' == 'true'"
+                                 Head="net10.0-windows10.0.19041.0"
+                                 HeadName="Windows app"
+                                 MadeBy="a build without TensorSharpSkipGgmlNative (or TensorSharp.GGML.Native/build-windows.ps1)" />
+  </ItemGroup>
+
+  <Target Name="BuildTensorAgentApp" AfterTargets="Build"
+          Condition="'$(SolutionFileName)' == 'TensorSharp.slnx'"
+          DependsOnTargets="_ResolveTensorAgentAppBuildHeads;BuildTensorAgentAppHead">
+    <!-- Shown on the solution's line by the terminal logger, which reads "<name> -> <path>". -->
+    <Message Condition="'@(_TensorAgentAppBuilt)' != ''" Importance="high" Text="$(SolutionName) -> $(_TensorAgentAppBin)" />
+  </Target>
+
+  <Target Name="RebuildTensorAgentApp" AfterTargets="Rebuild"
+          Condition="'$(SolutionFileName)' == 'TensorSharp.slnx'"
+          DependsOnTargets="_TensorAgentAppNoIncremental;BuildTensorAgentApp" />
+
+  <Target Name="_TensorAgentAppNoIncremental">
+    <PropertyGroup>
+      <_TensorAgentAppBuildArguments>--no-incremental</_TensorAgentAppBuildArguments>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="CleanTensorAgentApp" AfterTargets="Clean"
+          Condition="'$(SolutionFileName)' == 'TensorSharp.slnx'"
+          DependsOnTargets="_ResolveTensorAgentAppHeads;CleanTensorAgentAppHead" />
+
+  <!-- The heads this machine has whose workloads the SDK running this build provides. -->
+  <Target Name="_ResolveTensorAgentAppHeads">
+    <Message Condition="'@(_TensorAgentAppTargetFramework)' == ''" Importance="normal"
+             Text="TensorAgent: the app has macOS and Windows heads only; none is built on this OS." />
+    <Message Condition="'@(_TensorAgentAppTargetFramework)' != '' And '$(TensorSharpSkipTensorAgentApp)' == 'true'" Importance="high"
+             Text="TensorAgent: app skipped (TensorSharpSkipTensorAgentApp=true)." />
+    <Message Condition="$([MSBuild]::IsOSPlatform('OSX')) And '$(_TensorAgentAppMachineArch)' != 'arm64'" Importance="normal"
+             Text="TensorAgent: the iOS simulator app is built on Apple silicon only; GgmlOps.xcframework's simulator slice is arm64." />
+
+    <MSBuild Condition="'@(_TensorAgentAppTargetFramework)' != '' And '$(TensorSharpSkipTensorAgentApp)' != 'true'"
+             Projects="$(_TensorAgentAppProject)"
+             Targets="GetSuggestedWorkloads"
+             Properties="TargetFramework=%(_TensorAgentAppTargetFramework.Identity)">
+      <Output TaskParameter="TargetOutputs" ItemName="_TensorAgentAppMissingWorkload" />
+    </MSBuild>
+    <ItemGroup>
+      <_TensorAgentAppMissingWorkloadId Include="@(_TensorAgentAppMissingWorkload->Distinct())" />
+      <_TensorAgentAppAvailableHead Include="@(_TensorAgentAppHead)"
+                                    Condition="'$(TensorSharpSkipTensorAgentApp)' != 'true' And '@(_TensorAgentAppMissingWorkloadId)' == ''" />
+    </ItemGroup>
+    <!-- The SDK suggests a maui-* workload, or the bare platform one (ios, maccatalyst) when
+         MAUI itself is already there for another head. An SDK without the Apple workload
+         manifests at all (a source-built one, such as Homebrew's) suggests others, which
+         cannot make the app buildable. -->
+    <ItemGroup>
+      <_TensorAgentAppForeignWorkload Include="@(_TensorAgentAppMissingWorkloadId)" Exclude="ios;maccatalyst"
+                                      Condition="!$([System.String]::Copy('%(Identity)').StartsWith('maui-'))" />
+    </ItemGroup>
+    <PropertyGroup>
+      <_TensorAgentAppMissingMaui Condition="'@(_TensorAgentAppMissingWorkloadId)' != '' And '@(_TensorAgentAppForeignWorkload)' == ''">true</_TensorAgentAppMissingMaui>
+    </PropertyGroup>
+    <Warning Condition="'@(_TensorAgentAppMissingWorkloadId)' != '' And '$(_TensorAgentAppMissingMaui)' == 'true'"
+             Text="TensorAgent: app skipped. The .NET SDK running this build ($(MSBuildBinPath)) does not have the @(_TensorAgentAppMissingWorkloadId, ', ') workload(s) that TensorAgent/src/TensorAgent.Maui needs on this OS. Build with an SDK that has them (TensorAgent/README.md, Build and run), or add them to this one with 'dotnet workload install @(_TensorAgentAppMissingWorkloadId, ' ')'; -p:TensorSharpSkipTensorAgentApp=true skips the app without this warning." />
+    <Warning Condition="'@(_TensorAgentAppMissingWorkloadId)' != '' And '$(_TensorAgentAppMissingMaui)' != 'true'"
+             Text="TensorAgent: app skipped. The .NET SDK running this build ($(MSBuildBinPath)) cannot provide the .NET MAUI workloads that TensorAgent/src/TensorAgent.Maui needs on this OS (it suggests @(_TensorAgentAppMissingWorkloadId, ', ')). Build with an SDK that has them (TensorAgent/README.md, Build and run); -p:TensorSharpSkipTensorAgentApp=true skips the app without this warning." />
+  </Target>
+
+  <!-- Of those, the heads whose prerequisites are there. -->
+  <Target Name="_ResolveTensorAgentAppBuildHeads" DependsOnTargets="_ResolveTensorAgentAppHeads">
+    <ItemGroup Condition="'@(_TensorAgentAppAvailableHead)' != ''">
+      <_TensorAgentAppMissingPrerequisite Include="@(_TensorAgentAppPrerequisite)" Condition="!Exists('%(Identity)')" />
+      <_TensorAgentAppBuildHead Include="@(_TensorAgentAppAvailableHead)" />
+      <_TensorAgentAppBuildHead Remove="@(_TensorAgentAppMissingPrerequisite->'%(Head)')" />
+    </ItemGroup>
+    <Warning Condition="'@(_TensorAgentAppMissingPrerequisite)' != ''"
+             Text="TensorAgent: %(_TensorAgentAppMissingPrerequisite.HeadName) skipped. %(_TensorAgentAppMissingPrerequisite.Identity) is not there; %(_TensorAgentAppMissingPrerequisite.MadeBy) makes it (TensorAgent/README.md, Build and run)." />
+  </Target>
+
+  <!-- One head per batch, so a failing head still lets the others build and report. -->
+  <Target Name="BuildTensorAgentAppHead" Outputs="%(_TensorAgentAppBuildHead.Identity)"
+          Condition="'@(_TensorAgentAppBuildHead)' != ''">
+    <Message Importance="high"
+             Text="TensorAgent: building the %(_TensorAgentAppBuildHead.DisplayName) (%(_TensorAgentAppBuildHead.Identity), $(Configuration))" />
+    <!-- The child's own errors are logged as it prints them; the exit code is reported once
+         below, with the head it belongs to, instead of as MSB3073. -->
+    <Exec Command="&quot;$(_TensorAgentDotnet)&quot; build &quot;$(_TensorAgentAppProject)&quot; -f %(_TensorAgentAppBuildHead.Identity) %(_TensorAgentAppBuildHead.Arguments) $(_TensorAgentAppBuildArguments) $(_TensorAgentAppArguments)"
+          WorkingDirectory="$(MSBuildThisFileDirectory)"
+          EnvironmentVariables="$(_TensorAgentAppEnvironment)"
+          StandardOutputImportance="high"
+          IgnoreExitCode="true"
+          ContinueOnError="ErrorAndContinue">
+      <Output TaskParameter="ExitCode" PropertyName="_TensorAgentAppExitCode" />
+    </Exec>
+    <Error Condition="'$(_TensorAgentAppExitCode)' != '0'"
+           ContinueOnError="ErrorAndContinue"
+           Text="TensorAgent: the %(_TensorAgentAppBuildHead.DisplayName) (%(_TensorAgentAppBuildHead.Identity)) did not build (exit code $(_TensorAgentAppExitCode)); see its output above. %(_TensorAgentAppBuildHead.Script) builds it on its own; -p:TensorSharpSkipTensorAgentApp=true leaves the app out of the solution build." />
+    <Error Condition="'$(_TensorAgentAppExitCode)' == '0' And !Exists('%(_TensorAgentAppBuildHead.App)')"
+           ContinueOnError="ErrorAndContinue"
+           Text="TensorAgent: the %(_TensorAgentAppBuildHead.DisplayName) build succeeded but left nothing at %(_TensorAgentAppBuildHead.App)." />
+    <Message Condition="'$(_TensorAgentAppExitCode)' == '0' And Exists('%(_TensorAgentAppBuildHead.App)')" Importance="high"
+             Text="TensorAgent %(_TensorAgentAppBuildHead.DisplayName) -> %(_TensorAgentAppBuildHead.App)" />
+    <ItemGroup>
+      <_TensorAgentAppBuilt Include="@(_TensorAgentAppBuildHead)" Condition="'$(_TensorAgentAppExitCode)' == '0' And Exists('%(App)')" />
+    </ItemGroup>
+  </Target>
+
+  <!-- A clean that fails, e.g. on a restore made for a device RID by build-device.sh, must
+       not fail the solution's clean. -->
+  <Target Name="CleanTensorAgentAppHead" Outputs="%(_TensorAgentAppAvailableHead.Identity)"
+          Condition="'@(_TensorAgentAppAvailableHead)' != ''">
+    <Message Importance="high"
+             Text="TensorAgent: cleaning the %(_TensorAgentAppAvailableHead.DisplayName) (%(_TensorAgentAppAvailableHead.Identity), $(Configuration))" />
+    <Exec Command="&quot;$(_TensorAgentDotnet)&quot; clean &quot;$(_TensorAgentAppProject)&quot; -f %(_TensorAgentAppAvailableHead.Identity) %(_TensorAgentAppAvailableHead.Arguments) $(_TensorAgentAppArguments)"
+          WorkingDirectory="$(MSBuildThisFileDirectory)"
+          StandardOutputImportance="high"
+          ContinueOnError="WarnAndContinue" />
+  </Target>
+</Project>
