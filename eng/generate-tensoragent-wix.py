@@ -80,6 +80,25 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def validate_windows_relative_path(relative: str) -> None:
+    """Validate an unnormalized, slash-separated path inside the payload.
+
+    Work on the raw string rather than Path/filesystem operations: Windows can
+    turn colons into alternate data streams and remove trailing dots/spaces
+    before a directory scan ever sees the requested filename. The same lexical
+    policy must apply to payloads and contract tests on every build platform.
+    """
+    for part in relative.split("/"):
+        if (not part or part in (".", "..")
+                or re.search(r'[<>:"\\|?*\x00-\x1f]', part)
+                or part.endswith((".", " "))
+                # Win32 also reserves the ISO-8859-1 superscript digits in
+                # COM/LPT device names, including names with extensions.
+                or re.fullmatch(r"CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]",
+                                part.split(".")[0].rstrip(" "), re.IGNORECASE)):
+            raise ValueError(f"Invalid Windows payload filename: {relative}")
+
+
 def payload_manifest(publish_directory: Path, variant: str) -> list[dict[str, object]]:
     if variant not in VARIANTS:
         raise ValueError(f"Unsupported Windows variant: {variant}")
@@ -106,18 +125,15 @@ def payload_manifest(publish_directory: Path, variant: str) -> list[dict[str, ob
     files: list[dict[str, object]] = []
     seen: set[str] = set()
     for path in sorted(root.rglob("*"), key=lambda value: value.relative_to(root).as_posix().casefold()):
+        relative = path.relative_to(root).as_posix()
+        validate_windows_relative_path(relative)
         if path.is_symlink():
             raise ValueError(f"Windows payload cannot contain symbolic links: {path.relative_to(root)}")
-        relative = path.relative_to(root).as_posix()
         # Windows paths are case-insensitive; duplicate names can be created on
         # another OS but cannot be represented safely in a Windows installer.
         if relative.casefold() in seen:
             raise ValueError(f"Duplicate case-insensitive Windows payload path: {relative}")
         seen.add(relative.casefold())
-        if any(re.search(r'[<>:"\\|?*\x00-\x1f]', part) or part.endswith((".", " "))
-               or re.fullmatch(r"CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]", part.split(".")[0], re.IGNORECASE)
-               for part in path.relative_to(root).parts):
-            raise ValueError(f"Invalid Windows payload filename: {relative}")
         if not path.is_file():
             continue
         files.append({"path": relative, "size": path.stat().st_size, "sha256": sha256(path)})

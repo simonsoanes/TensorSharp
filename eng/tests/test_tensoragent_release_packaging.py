@@ -1,7 +1,10 @@
-"""Release tags must work in archive names, app metadata and Windows Installer."""
+"""Release versions and platform packaging commands must satisfy their contracts."""
 import importlib.util
+import json
 import os
 from pathlib import Path
+import plistlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -49,6 +52,62 @@ class ReleaseVersionTests(unittest.TestCase):
             subprocess.run([sys.executable, str(ENG / "resolve-release-version.py")],
                            env=environment, check=True, capture_output=True, text=True)
             self.assertEqual(output.read_text(), "version=2026.10.03\ntag=v2026.10.03\napp_version=2026.10.3\n")
+
+
+@unittest.skipUnless(sys.platform == "darwin", "Mac packager uses macOS bundle tools")
+class MacDesktopPackagingTests(unittest.TestCase):
+    def test_checks_both_binaries_with_xcode26_lipo_argument_order(self):
+        artifact_root = ENG.parent / "artifacts"
+        artifact_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="mac packaging fixture ", dir=artifact_root) as directory:
+            root = Path(directory)
+            app = root / "TensorAgent.app"
+            executable = app / "Contents/MacOS/TensorAgent.Maui"
+            library = app / "Contents/MonoBundle/libGgmlOps.dylib"
+            for file in (executable, library, app / "Contents/Resources/webui/index.html"):
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(b"fixture")
+            executable.chmod(0o755)
+            (app / "Contents/Resources/skills").mkdir()
+            (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": executable.name}))
+
+            commands = root / "commands"
+            commands.mkdir()
+            log = root / "lipo.jsonl"
+            # Reproduce Xcode 26.6's grammar: all arguments after -verify_arch
+            # are architecture names. Stop after both calls, before packaging;
+            # real signatures and archives are validated separately on macOS.
+            shim = root / "strict_lipo.py"
+            shim.write_text('''import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if "-verify_arch" not in args:
+    sys.exit(64)
+command = args.index("-verify_arch")
+if command == 0 or args[command + 1:] != ["arm64"]:
+    sys.exit(64)
+if not all(Path(source).is_file() for source in args[:command]):
+    sys.exit(65)
+with open(os.environ["LIPO_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(args[:command]) + "\\n")
+if any(source.endswith("libGgmlOps.dylib") for source in args[:command]):
+    sys.exit(73)
+''', encoding="utf-8")
+            (commands / "codesign").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (commands / "lipo").write_text(
+                f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(shim))} \"$@\"\n",
+                encoding="utf-8")
+            for command in commands.iterdir():
+                command.chmod(0o755)
+            environment = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ["PATH"], LIPO_LOG=str(log))
+            result = subprocess.run(["bash", str(ENG / "package-tensoragent-macos.sh"), str(app), "2026.10.03",
+                                     str(root / "packages")], env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 73, result.stderr)
+            self.assertEqual([json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()],
+                             [[str(executable)], [str(library)]])
 
 
 if __name__ == "__main__":

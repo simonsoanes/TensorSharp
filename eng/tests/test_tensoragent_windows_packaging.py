@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 
@@ -91,12 +92,43 @@ class WindowsDesktopPackagingTests(unittest.TestCase):
             wix.payload_manifest(self.publish, "win-x64-cpu")
 
     def test_windows_invalid_names_are_rejected(self):
-        for name in ("bad:name.txt", "CON.txt", "trailing. "):
-            target = self.publish / name
-            target.write_bytes(b"fixture")
+        # Do not physically create these names. On Windows a colon denotes an
+        # NTFS stream, while Win32 removes trailing dots/spaces from filenames.
+        names = [f"bad{character}name.txt" for character in '<>:"\\|?*']
+        names += [f"bad{chr(value)}name.txt" for value in range(32)]
+        names += ["trailing.", "trailing ", "trailing. ", "webui/trailing./index.html"]
+        for name in names:
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Invalid Windows"):
-                wix.payload_manifest(self.publish, "win-x64-cpu")
-            target.unlink()
+                wix.validate_windows_relative_path(name)
+
+    def test_windows_reserved_devices_are_rejected_in_every_component(self):
+        devices = ["CON", "PRN", "AUX", "NUL"]
+        devices += [f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in "123456789¹²³"]
+        for device in devices:
+            for name in (device, device.lower() + ".txt", device + ".tar.gz", device + " .txt", "skills/" + device + "/SKILL.md"):
+                with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Invalid Windows"):
+                    wix.validate_windows_relative_path(name)
+
+    def test_windows_payload_paths_must_be_canonical_and_relative(self):
+        for name in ("", ".", "..", "./index.html", "../index.html", "webui/../index.html",
+                     "webui/./index.html", "/index.html", "//server/share/index.html", "C:/index.html",
+                     "C:index.html", "\\index.html", "\\\\server\\share\\index.html", "webui//index.html", "webui/"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Invalid Windows"):
+                wix.validate_windows_relative_path(name)
+
+    def test_windows_valid_payload_names_are_accepted_without_normalization(self):
+        for name in ("TensorAgent.Maui.exe", ".hidden-payload", "webui/assets/a&b.js", "skills/example.v2/SKILL.md",
+                     "COM10.txt", "LPT10/index.html", "webui/conversation.txt", "日本語/model.json", "version 1.0/data.json"):
+            with self.subTest(name=name):
+                self.assertIsNone(wix.validate_windows_relative_path(name))
+
+    def test_payload_scan_applies_lexical_validation_to_files_and_directories(self):
+        # Synthetic traversal entries preserve the invalid spelling on Windows
+        # without creating ADS/device files or relying on POSIX-only filenames.
+        for relative in ("webui/bad:name.txt", "skills/trailing. ", "skills/AUX/example.md"):
+            with self.subTest(relative=relative), patch.object(Path, "rglob", return_value=[self.publish / relative]):
+                with self.assertRaisesRegex(ValueError, "Invalid Windows"):
+                    wix.payload_manifest(self.publish, "win-x64-cpu")
 
     def test_both_variants_share_upgrade_family_and_replace_same_version(self):
         files = wix.payload_manifest(self.publish, "win-x64-cpu")

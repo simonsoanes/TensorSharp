@@ -18,8 +18,9 @@ done
 EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
 [[ -x "$APP/Contents/MacOS/$EXECUTABLE" ]] || { echo "Missing app executable." >&2; exit 1; }
 codesign --verify --deep --strict "$APP"
-lipo -verify_arch arm64 "$APP/Contents/MacOS/$EXECUTABLE"
-lipo -verify_arch arm64 "$APP/Contents/MonoBundle/libGgmlOps.dylib"
+# Xcode 26.6 treats every argument after -verify_arch as an architecture.
+lipo "$APP/Contents/MacOS/$EXECUTABLE" -verify_arch arm64
+lipo "$APP/Contents/MonoBundle/libGgmlOps.dylib" -verify_arch arm64
 python3 - "$APP" "$VERSION" <<'PY'
 import plistlib
 from pathlib import Path
