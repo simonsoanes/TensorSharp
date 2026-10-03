@@ -437,12 +437,15 @@ namespace TensorSharp.Models
             // The active fields hold the primary cache with the owner's live state.
             // Move those into the owner's holder (zero copy).
             var holder = SnapshotActiveCache();
+            // Allocate the replacement before publishing the move. If allocation
+            // fails, the live primary still owns its unchanged KV/recurrent state.
+            _fusedHolders.EnsureCapacity(checked(_fusedHolders.Count + 1));
+            var fresh = CreateFreshHolder();
             _fusedHolders[requestId] = holder;
             _activeFusedKey = requestId;
 
             // Give the primary a fresh empty allocation so a future N==1 step for a
             // never-fused request doesn't reset the adopted holder's tensors.
-            var fresh = CreateFreshHolder();
             _primaryHolder = fresh;
         }
 

@@ -355,10 +355,11 @@ itself. Two things followed:
   - OpenAI, image on turn 3: `This digital artwork features an anime-style woman...`
     became `This image features an anime-style illustration of a young woman...`
   - Web UI, image on turn 1: unchanged over 96 tokens.
-- **Reuse.** A cache that went through an image turn was not the state a re-prefill of
-  the same history builds, so Phase 0 of the prefix cache stopped every reuse path at
-  the first image (`SupportsReuseAcrossMediaSpan = false`). Qwen 3.5/3.6 now declare
-  `true`: follow-up turns continue the cache past the image.
+- **Reuse.** Preserving the per-sequence rotary delta lets a follow-up continue an
+  exact cached endpoint past an identical image or video span. Radix keys check
+  media identity and span boundaries as well as tokens; changed media or another
+  conversation scope cannot claim that conversation's state. GDN state still
+  cannot rewind, so a shorter partial match must prefill.
 
 **Validation.**
 
@@ -653,6 +654,33 @@ significantly accelerates the multi-tile image path.
   projection + bias + residual into one GGML graph dispatch (7 ops → 1).
 
 Combined, each vision encoder block goes from ~15 GPU round-trips to 2.
+The whole-encoder fast path fuses all blocks into one graph. Its default CUDA
+attention writes each query tile into one output allocation, avoiding repeated
+copies of preceding tiles while preserving the existing attention arithmetic.
+
+Validation on 2026-10-03 used the Flash Next BF16 projector, the supplied photo
+(7,920 patches / 1,980 tokens), and a single RTX 3080 Laptop GPU (16 GB, WDDM,
+CUDA 12.6), against unchanged upstream ggml
+`353b63b439f27ab2cc19dac97ab1681ba6d2d084`. All 5,068,800 projected float32
+values were bit-identical to the previous encoder. The attention microbenchmark
+reduced scratch from 394.8 MB to 343.6 MB (13%). With one warmup and three
+standalone encoder samples, median time was 2,947.4 ms versus 2,982.0 ms;
+this small, noisy difference does not establish an end-to-end latency gain.
+
+Experimental `TS_QWEN_VISION_F32=1` enables TensorSharp-owned streaming F32
+CUDA attention for 72-wide heads. The same standalone encoder measured
+2,635.7 ms (11.6% faster than the previous encoder), with 36.5 MB of attention
+scratch. Its full-embedding comparison failed the conservative minimum-row
+cosine gate: 0.999856 versus a required 0.9999; aggregate relative L2 was
+0.002069. It remains opt-in and has no end-to-end model-quality qualification.
+The native suites passed 168 numerical cases (78 existing attention cases and
+six vision cases on each of CPU and CUDA) plus ten broader CPU regression
+targets, without failures or skips. These measurements cover one projector,
+photo and GPU; other projectors, videos and devices were not benchmarked.
+Reusable checks are `GgmlOpsCudaAttentionPrecisionTest --benchmark-vision
+7920 7920 16 3` and
+[`compare-vision-embeddings.py`](../../eng/validation/compare-vision-embeddings.py).
+Generated evidence stays in ignored `artifacts/qwen-ttft/`.
 
 ### Cross-layer caches and parallelism
 
@@ -842,6 +870,68 @@ Allocated once in `InitGDNBuffers()`:
   loaded model whose first scheduled step is a concurrent one, followed later by a solo
   decode on the primary cache. The arena batched decode treats a holder without a
   scratch the same way. `Qwen35ConvScratchTests` (model-gated) covers it.
+
+### Radix prefix reuse
+
+The `Qwen35Model` family, including Qwen3.8 dense models, declares
+`DeferPrimaryConversion`: an eligible finished primary stays live for an exact
+next turn. The next turn claims that state without allocating another cache.
+Only a request that displaces the primary attempts to move it into a retained
+holder and allocate an empty replacement. Concurrent per-request holders and
+shared-prefix checkpoint copies keep their existing retention paths. Every path
+preserves attention KV, native GDN state and the per-sequence rotary delta;
+reuse remains exact because the recurrent state cannot rewind.
+
+Retained holders and checkpoint copies are extra payloads governed by the radix
+tree's count and byte caps. Default device/state caps are resolved from half the
+spare memory when the engine is created, then bounded by current spare memory
+minus running-request reserves. The live-primary marker adds no extra retained
+bytes, so an exact continuation does not depend on enough headroom to allocate a
+second primary. Disabling extra holder retention still permits that live cache
+to continue while prefix caching is enabled. If displacement cannot retain the
+old state, the new request prefills normally. Before allocating, the tree measures
+the live primary's eventual holder footprint and declines conversion when an
+absolute option or family cap cannot admit it.
+
+Adoption allocates the replacement before publishing the moved primary.
+`PrefixCheckpointOwnershipTests.QwenPrimaryAdoptionFailure_…` injects failures at
+each of six allocations, checks unchanged live state and allocation ownership,
+and verifies a later checkpoint remains independent. The Qwen4Exp native
+continuation regression exercises the same ordering. Primary-measurement tests
+require estimate/adopted-footprint parity, unchanged state and no tensor allocation,
+with invalid lengths and checked-out holders refused. Runtime
+`DeferredPrimaryCacheTests` verifies exact continuation, displacement, a zero
+extra-retention budget and recovery from a conversion failure with cold-output
+parity. These are synthetic state/ownership checks, separate from trained-model
+quality and performance validation.
+
+On 2026-10-03, HTTP validation used the supplied
+`Qwen3.8-27B-UD-IQ4_XS.gguf`, GGML CUDA, an i7-11800H, 32 GB RAM and one
+RTX 3080 Laptop GPU with 16 GB VRAM. Five two-turn conversations used the same
+short Chinese prompt, greedy sampling, repetition penalty 1 and a 256-token
+limit. All ten replies completed at EOS and matched the original build exactly.
+
+| Web UI request | Original median TTFT | Updated median TTFT | Updated reuse |
+|---|---:|---:|---:|
+| Initial question | 581.6 ms | 524.8 ms | 0/28 tokens |
+| `请继续` | 664.8 ms | 435.5 ms | 55/70 tokens |
+
+The OpenAI-compatible endpoint also completed both turns at EOS with 55/70
+tokens reused. A separate three-turn, 128-token dialogue reused 171/187 and
+315/331 tokens; an earlier-history branch and a changed independent question
+reused zero, and the independent arithmetic answer remained `579`. Longer
+cached replies differed from cold-prefill replies, so later differing histories
+are not qualified timing or greedy-parity comparisons. The initial long-prompt
+sample took 792 ms versus 573 ms in the original run; the repeated short-prompt
+results do not establish a latency guarantee for every independent request.
+
+Loading and startup warmup are excluded; GPU clocks, WDDM paging and the OS file
+cache were uncontrolled. Upstream ggml was unchanged at
+`353b63b439f27ab2cc19dac97ab1681ba6d2d084`. Commands, strict reuse checks and
+comparison rules are in [the HTTP benchmark guide](../../eng/validation/README-qwen-chat-cache-benchmark.md).
+Generated answers, timings and test results remain in ignored
+`docs/validation/qwen-ttft/`; missing external models and the two-GPU case are
+excluded from passing coverage.
 
 ### File-mapped quantized weights
 

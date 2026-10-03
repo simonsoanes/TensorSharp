@@ -20,18 +20,40 @@ kernels run instead, and those in turn fall back op-by-op). Vision rides the
 Qwen3.5-VL tower with (T,H,W) IMRoPE positions; multi-image and multi-turn
 image sessions are supported, with KV reuse across turns (the GDN recurrence
 cannot rewind, so a cached prefix is reused only when the new prompt extends
-it exactly; see [Retained-prefix reuse](#retained-prefix-reuse)). In the
-radix prefix cache that reuse stops at the first image or video span of a
-conversation: the family does not declare
-reuse across a media span (it stores an M-RoPE cache gap that no
-reference-position test covers yet). Because this family resumes only from a
-holder or checkpoint of exactly the matched length, a later turn reuses at most
-a stored checkpoint that ends before the attachment (typically the system
-prompt) and re-prefills the rest.
+it exactly; see [Retained-prefix reuse](#retained-prefix-reuse)). Radix reuse
+can continue past an identical image or video span: the complete state includes
+the M-RoPE cache gap and QSA position history, and the key checks media identity
+and span boundaries as well as tokens. A finished primary cache stays in place
+for the next exact turn; it becomes a retained holder only when another request
+needs to displace it.
 
 Thinking can be switched on or off. With it off, the assistant turn opens with
 the closed, empty `<think>\n\n</think>` block the published template emits,
 and replayed history keeps that exact suffix so cached prefixes still match.
+
+## Vision encoder memory and validation
+
+The shared Qwen-VL whole-encoder graph now writes CUDA attention tiles into one
+output allocation, preserving the default attention arithmetic. On 2026-10-03,
+the supplied photo produced 7,920 patches / 1,980 tokens with `mmproj-BF16.gguf`;
+all 5,068,800 projected float32 values were bit-identical to the previous
+encoder. Attention scratch fell from 394.8 MB to 343.6 MB (13%). One warmup
+and three standalone samples measured a median of 2,947.4 ms versus 2,982.0 ms;
+the small, noisy difference does not establish an end-to-end latency gain.
+
+Experimental `TS_QWEN_VISION_F32=1` selects TensorSharp-owned streaming F32
+CUDA attention for 72-wide heads: the same encoder measured 2,635.7 ms, an
+11.6% improvement, with 36.5 MB of attention scratch. Its full-embedding
+comparison failed the conservative minimum-row cosine gate (0.999856 versus
+0.9999 required; aggregate relative L2 0.002069), so it remains opt-in without
+end-to-end model-quality qualification. Validation used a single RTX 3080
+Laptop GPU (16 GB, WDDM, CUDA 12.6) and unchanged upstream ggml
+`353b63b439f27ab2cc19dac97ab1681ba6d2d084`: 168 native numerical cases and ten
+broader CPU regression targets passed, with no failures or skips. The numeric
+cases comprise 78 existing attention cases and six vision cases on each of CPU
+and CUDA; other projectors, videos and devices were not benchmarked. See the
+[shared encoder checks](qwen35.md#fused-vision-encoder-blocks) for reusable
+tools. Generated evidence stays in ignored `artifacts/qwen-ttft/`.
 
 ## Tool calling and agent workflows
 
@@ -224,6 +246,12 @@ that difference instead of requiring bit equality; see
 `Qwen4ExpModel.RetainedCache.cs` gives `qwen4exp` the retained-holder reuse the
 Qwen 3.5 and DeepSeek V4 paths have:
 
+- An eligible finished primary cache stays **live** in the radix tree
+  (`DeferPrimaryConversion`). An exact next turn claims that same cache without
+  allocating a replacement. Its tree marker adds no retained-state bytes; the
+  memory already belongs to the model's primary execution cache. Another request
+  displaces it by converting it to a holder only when retention is available.
+  A refused or failed conversion makes that request prefill normally.
 - A finished conversation's whole per-sequence holder is **retained** and
   re-keyed for the turn that extends it exactly. Nothing moves: the native
   state entries keyed on the holder, its captured graphs and the draft head's
@@ -236,16 +264,28 @@ Qwen 3.5 and DeepSeek V4 paths have:
 - Reuse is **exact-prefix only** (`IExactFusedCacheReuse`): a holder whose
   tokens the new prompt does not reproduce to the last one is not a
   continuation, and every partial match re-prefills.
-- Both retained conversations and checkpoints count against one budget,
+- Exact reuse may cross identical media. Holders and checkpoint clones preserve
+  `MropeCacheGap`: after a staged chunk it is `KV length - 1 - last T`, and a
+  following scalar token rotates at `KV index - gap`. The gap is the negative of
+  Qwen 3.5's rotary delta, including signed video offsets. Changed media content,
+  span boundaries or conversation scope cannot claim that conversation's state.
+- Extra retained holders and checkpoints count against
   `TS_Q4E_RETAINED_CACHE_MB`, clamped by measured memory headroom; `0` or an
-  unparsable value declines every retention. Unset, half the measured headroom
-  is the budget, the rule Qwen 3.5 applies to its idle holders, and 4096 MB
-  applies only where no headroom can be measured. The fixed 4096 MB default this
-  replaced held three of four concurrent conversations on a 4x A40 tensor split
-  (1318.6 MB holders at 1.6k tokens, 15 GB of headroom), so one of them
-  re-prefilled on every turn. The radix prefix cache owns retention and
-  eviction, so this budget only refuses a holder that does not fit (reported
-  once).
+  unparsable value declines those payloads. This does not disable exact reuse of
+  an already live primary. Unset, model admission uses half the current measured
+  headroom, with 4096 MB only where no headroom can be measured. The radix tree
+  also resolves its default device/state caps from half the spare memory at
+  engine creation and checks current spare memory minus running-request reserves.
+  Its live-primary marker is not charged again as an extra holder. The tree owns
+  eviction; model admission refuses a holder that does not fit and the tree may
+  release an older scoped payload before retrying.
+- Before displacement allocates a replacement, the tree can measure the live
+  primary's eventual holder footprint and decline conversion if it exceeds an
+  absolute option or family cap. Qwen4Exp also checks its retention budget before
+  allocating. Admission still rechecks after allocation because headroom can change.
+- Primary adoption allocates its empty replacement before publishing the moved
+  holder. An allocation failure leaves the live KV and recurrent state intact
+  and publishes no partial holder.
 - It needs the complete GGML token-span path (every piece of per-sequence state
   device-resident and keyed by the holder) and a GDN state layout the native
   entry can be copied through exactly. Retention works under a layer split;
@@ -254,10 +294,24 @@ Qwen 3.5 and DeepSeek V4 paths have:
 
 Evidence (synthetic fixtures, not trained-model acceptance or performance):
 `Qwen4ExpRetainedCacheTests` / `Qwen4ExpRetainedCachePolicyTests` cover
-retained A/B/A, checkpoint clones, speculative rebound, budget eviction,
-missing-state refusal and QSA first/reset growth, and a physical two-GPU
-layer-split checkpoint lifecycle on CUDA. Every gate is bit-exact on CPU. On
-single-GPU CUDA a four-token target verify equals four one-token forwards
+retained A/B/A, checkpoint clones, speculative rebound, budget refusal followed
+by owner release, missing-state refusal and QSA first/reset growth. Engine tests
+compare exact image follow-ups with cold greedy output and require zero reuse
+for changed media or another scope. Allocation-failure tests verify unchanged
+native continuation and no published holder. Measurement tests require the
+live-primary estimate to equal the adopted holder's
+footprint and reject checked-out holders or invalid lengths without tensor allocation.
+`Qwen35MRopeReferencePositionTests`
+also checks Qwen4Exp chunked positions, signed gaps and follow-up decode against
+six independent SGLang fixtures. These fixtures exercise QSA/GDN/PLE/MTP state;
+they do not evaluate a trained vision encoder. The checked-in small weights can
+be materialized with [the fixture tool](../../eng/qwen4exp-mtp-fixture.py) using
+`--sample-csharp InferenceWeb.Tests/Qwen4ExpMtpSample.cs --qsa`.
+`DeferredPrimaryCacheTests` covers live-primary continuation with no replacement
+allocation, actual displacement, a zero extra-retention budget and conversion
+failure followed by cold-output parity. The physical two-GPU layer-split
+checkpoint test remains gated and was skipped in the current single-GPU run.
+On single-GPU CUDA a four-token target verify equals four one-token forwards
 (`TeacherForcedTargetVerify_…`) and 32 teacher-forced tokens committed in blocks
 of 2-4 equal scalar decode at every row (`RepeatedTargetBlocks_…`), bit for bit —
 see [Verify rows run the one-token kernels](#verify-rows-run-the-one-token-kernels).
@@ -267,6 +321,53 @@ prefill on CUDA, because prefill kernels are chosen by batch width:
 1.7e-4 to 4.4e-4 in logits; the stale-seed defect it was written for moved them
 by 0.3155) and allows a greedy change only at a near-tie within twice the
 measured difference (measured on an A40, 2026-09-17).
+
+## Single-GPU HTTP validation (2026-10-03)
+
+The supplied UD-IQ1_M shards and BF16 projector were exercised through the Web
+UI API with the original `20241021_022843061_iOS.jpg`, `请详细描述这幅图`, then
+`请继续`. The machine was an i7-11800H with 32 GB RAM and one RTX 3080 Laptop
+GPU with 16 GB VRAM. Both builds used GGML CUDA, default context and expert
+placement, greedy sampling, repetition penalty 1, no skills or agent delegation,
+and no speculative decoding. The owned streaming vision kernel remained off.
+The original image produced 7,920 patches and 1,980 vision tokens.
+
+| 128-token workflow | Original TTFT | Updated TTFT | Updated cache reuse |
+|---|---:|---:|---:|
+| Initial image question | 98.218 s | 45.981 s | 0/1,997 tokens |
+| First `请继续` | 87.697 s | 2.381 s | 2,125/2,140 tokens |
+| Second `请继续` | Not comparable | 1.243 s | 2,268/2,283 tokens |
+
+The initial 128-token answer was identical. The first continuation had identical
+input history but different output text; the second continuation therefore had
+different histories between builds and has no qualified comparison. These are
+single-pass observations, not an aggregate answer-parity or quality score.
+The first two updated replies hit the 128-token cap; the third stopped after
+124 tokens. GPU clocks, WDDM paging and the OS file cache were uncontrolled,
+and model loading/startup warmup are excluded. The original image benchmark
+followed two text requests, while the final image benchmark followed startup.
+Do not attribute the entire first-request difference to vision attention alone.
+The unchanged placement still runs routed experts for 40 of 48 layers on the
+CPU, so a fresh 1,997-token multimodal prefill remains expensive.
+
+A separate 1,024-token-limit run completed the initial image description at EOS
+after 496 tokens; its beginning matched the original 128-token answer. Its
+follow-up reused 2,494/2,508 tokens with 4.289 s TTFT, but hit the 1,024-token cap.
+The saved descriptions contain unverified interpretive claims; there is no
+uncapped original-build comparison or formal visual-accuracy grade.
+
+Final CUDA cache coverage passed 13 distinct synthetic cases: 12 use supported
+GDN/attention geometry with 64-wide attention heads; the small-buffer chunking
+regression uses supported GDN geometry with 8-wide attention heads so its KV
+buffers remain below 4,096 bytes. The physical two-GPU case was skipped. CPU
+cache/ownership suites passed 410 cases with nine unavailable checks excluded;
+26 focused adapter/failure tests passed after the final exception cleanup.
+Upstream ggml remained unchanged at
+`353b63b439f27ab2cc19dac97ab1681ba6d2d084`. Reproduction and comparison rules
+are in [the HTTP benchmark guide](../../eng/validation/README-qwen-chat-cache-benchmark.md).
+Generated reports, answers, provenance and coverage remain in ignored
+`docs/validation/qwen-ttft/`; vision numerical evidence is under
+`artifacts/qwen-ttft/`.
 
 ## Speculative decoding with the shared MTP head
 

@@ -17,7 +17,7 @@ PLE n-gram 嵌入块、×4 hyper-connection 流以及 512 专家的 MoE。GGUF �
 最后的 mixer 以及 LM head——并配一个按形状索引的已捕获图缓存
 （span 放弃时改走逐层融合 kernel，后者再逐算子回退）。视觉沿用
 Qwen3.5-VL 塔，位置用 (T,H,W) IMRoPE；支持多图与多轮图像会话，并在轮次之间复用
-KV（GDN 递归无法回退，因此只有当新 prompt **恰好扩展**已缓存前缀时才复用；见[保留前缀复用](#保留前缀复用)）。在 radix 前缀缓存中，这种复用止于会话中第一个图像或视频 span：该系列尚未声明可跨媒体 span 复用（它保存了一段 M-RoPE 缓存间隙，目前还没有参照位置测试覆盖）。由于该系列只能从长度与匹配长度完全一致的 holder 或检查点续接，之后的轮次最多复用附件之前已存储的检查点（通常是系统提示词），其余部分重新 prefill。
+KV（GDN 递归无法回退，因此只有当新 prompt **恰好扩展**已缓存前缀时才复用；见[保留前缀复用](#保留前缀复用)）。radix 复用可以越过相同的图像或视频 span：完整状态保存 M-RoPE 缓存间隙与 QSA 位置历史，键同时校验媒体身份、span 边界与 token。结束的主缓存留在原处供下一轮精确续接；只有其他请求需要替换它时，才转换为保留 holder。
 
 思考模式可以开启或关闭。关闭时，助手轮次以已发布模板输出的闭合空块 `<think>\n\n</think>` 开头，重放历史时也保留这一确切后缀，因此缓存前缀仍能匹配。
 
@@ -142,6 +142,9 @@ MP4、WebM 或 MOV data URI（不会抓取远程 URL）：
 
 `Qwen4ExpModel.RetainedCache.cs` 为 `qwen4exp` 提供与 Qwen 3.5、DeepSeek V4 路径相同的保留 holder 复用：
 
+- 符合条件的已结束主缓存以**存活状态**登记在 radix 树中（`DeferPrimaryConversion`）。下一轮精确续接
+  直接使用同一缓存，不分配替代缓存；树中的标记不增加保留状态字节。只有其他请求需要替换主缓存时，
+  才尝试转换为 holder。转换被拒绝或失败时，新请求正常重新 prefill。
 - 结束的会话的整个逐序列 holder 会被**保留**，并为恰好扩展它的下一轮重新设键。什么都不移动：以该
   holder 为键的原生状态条目、它的已捕获图以及草稿头的私有 K/V 都留在原处。
 - 所有聊天共享的 prompt 结尾处的状态会被**检查点**为以主机为准的深拷贝（注意力 K/V、QSA 原始 key
@@ -149,20 +152,31 @@ MP4、WebM 或 MOV data URI（不会抓取远程 URL）：
   拒绝执行，而不是拷贝陈旧的主机种子。
 - 复用**仅限精确前缀**（`IExactFusedCacheReuse`）：新 prompt 没有逐 token 复现到最后一个的 holder
   不是它的延续，任何部分匹配都会重新 prefill。
-- 保留的会话与检查点共用一个预算 `TS_Q4E_RETAINED_CACHE_MB`（受实测内存余量限制；
-  `0` 或无法解析的值会拒绝所有保留）。未设置时，预算为实测余量的一半（与 Qwen 3.5 对空闲
-  holder 采用的规则相同），只有在无法测得余量时才使用 4096 MB。此前固定的 4096 MB 默认值在
-  4x A40 张量并行下只能容纳四个并发会话中的三个（1.6k token 时每个 holder 1318.6 MB，余量
-  15 GB），其中一个会话每一轮都要重新 prefill。radix 前缀缓存负责保留与驱逐，这个预算只会拒绝放不下的
-  holder（只报告一次）。
+- 精确复用可跨越相同媒体。holder 与检查点克隆保存 `MropeCacheGap`：分块结束后为
+  `KV length - 1 - last T`，后续标量 token 的旋转位置为 `KV index - gap`。它等于 Qwen 3.5
+  rotary delta 的负值，也保留视频偏移的符号。媒体内容、span 边界或会话 scope 改变时，不能使用该会话状态。
+- 额外的保留 holder 与检查点共用预算 `TS_Q4E_RETAINED_CACHE_MB`，受实测内存余量限制；
+  `0` 或无法解析的值拒绝这些额外状态，但不关闭现有存活主缓存的精确复用。未设置时，模型准入使用当前
+  实测余量的一半，无法测得余量时才使用 4096 MB。radix 树在引擎创建时按空余内存的一半确定默认设备/
+  状态上限，还按当前余量扣除运行请求的预留量检查；主缓存标记不作为额外 holder 再次计费。树负责驱逐，
+  模型拒绝放不下的 holder，树可以释放较旧的 scoped 状态后重试。
+- 主缓存转换先分配空替代缓存，再发布已移动的 holder。分配失败时，原有 KV 与递归状态保持完整，
+  不发布半成品 holder。
+- 替换前，树可测量主缓存转换后的 holder 大小，超过绝对配置或模型上限时直接拒绝；Qwen4Exp 也先检查
+  保留预算，避免无效的替代分配。分配后的准入仍重新检查内存余量。测量测试要求估算与实际转换大小相同，
+  并在不分配 tensor 的情况下拒绝无效长度与已借出的 holder。
 - 它需要完整的 GGML token-span 路径（每一份逐序列状态都驻留在设备上并以 holder 为键），以及原生
   条目可以精确拷贝的 GDN 状态布局。保留在按层切分下可用；检查点在按层切分下被接受，在张量并行下
   被拒绝。
 
 证据（合成 fixture，不代表训练模型的验收或性能）：
 `Qwen4ExpRetainedCacheTests` / `Qwen4ExpRetainedCachePolicyTests` 覆盖保留 A/B/A、检查点克隆、投机重绑定、
-预算驱逐、缺失状态拒绝以及 QSA 首次/重置增长，并在 CUDA 上覆盖真实双 GPU 按层切分的检查点生命周期。
-所有关卡在 CPU 上都逐位一致。在单卡 CUDA 上，一次 4 token 的目标验证与 4 次单 token 前向逐位相同
+预算拒绝后由 owner 释放、缺失状态拒绝以及 QSA 首次/重置增长。引擎测试比较精确图像续接与冷启动贪心输出，
+并要求媒体或 scope 改变时复用为零。分配失败测试确认原生续接状态不变且不发布 holder；
+`Qwen35MRopeReferencePositionTests` 还将 Qwen4Exp 分块位置、有符号 gap 与续接 decode 对照六组独立
+SGLang fixture。这些夹具覆盖 QSA/GDN/PLE/MTP 状态，不评估训练得到的视觉编码器。
+`DeferredPrimaryCacheTests` 覆盖无需替代分配的主缓存续接、实际替换、零额外保留预算与转换失败后的冷启动输出一致性。
+真实双 GPU 按层切分测试仍受设备条件限制，在此次单 GPU 运行中跳过。在单卡 CUDA 上，一次 4 token 的目标验证与 4 次单 token 前向逐位相同
 （`TeacherForcedTargetVerify_…`），以 2–4 为块提交的 32 个 teacher-forced token 在每一行上都与标量解码
 逐位相同（`RepeatedTargetBlocks_…`）——见 [验证行使用单 token kernel](#验证行使用单-token-kernel)。
 16 token 的 prefill 再接 4 个 token，在 CUDA 上与一次 20 token 的 prefill 并不逐位相同，因为 prefill 的

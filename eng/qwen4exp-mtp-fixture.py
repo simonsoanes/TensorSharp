@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -41,10 +42,37 @@ def byte_tokens():
     return [mapping[b] for b in range(256)] + ["<|bos|>", "<|eos|>", "<|pad|>", "ab"]
 
 
+def read_csharp_sample(path):
+    """Read the checked-in reduced weight fixture without executing C# code."""
+    source = path.read_text(encoding="utf-8")
+    arrays = {}
+    for field, key, count in (
+        ("EmbeddingNorm", "embedding_norm", 8), ("HiddenNorm", "hidden_norm", 32),
+        ("Eh", "eh", 128), ("HeadNorm", "head_norm", 32),
+        ("HeadDown", "head_down", 96), ("HeadUp", "head_up", 96),
+    ):
+        match = re.search(r"float\[\]\s+" + field + r"\s*=\s*new float\[\]\s*\{([^}]+)\}", source)
+        if match is None:
+            raise ValueError(f"Missing reduced sample array {field}")
+        values = [float(value.strip().removesuffix("f")) for value in match[1].split(",") if value.strip()]
+        if len(values) != count or not all(np.isfinite(values)):
+            raise ValueError(f"Invalid reduced sample array {field}")
+        arrays[key] = values
+    epsilon = re.search(r"const float Epsilon\s*=\s*([0-9.eE+-]+)f;", source)
+    if epsilon is None:
+        raise ValueError("Missing reduced sample epsilon")
+    return dict(hidden=8, streams=4, rank=3, epsilon=float(epsilon[1]), arrays=arrays,
+                scope="Checked-in reduced actual-weight arithmetic sample; synthetic target weights.",
+                csharp_source_sha256=sha(path))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output_dir", type=Path)
-    parser.add_argument("--sample", type=Path, required=True)
+    samples = parser.add_mutually_exclusive_group(required=True)
+    samples.add_argument("--sample", type=Path)
+    samples.add_argument("--sample-csharp", type=Path,
+                         help="Use the checked-in InferenceWeb.Tests/Qwen4ExpMtpSample.cs arrays.")
     parser.add_argument("--geometry", choices=("tiny", "gdn32"), default="tiny",
                         help="gdn32 uses supported CUDA GDN/conv dimensions; tiny preserves the CPU fixture")
     parser.add_argument("--qsa", action="store_true", help="Enable synthetic target QSA with ratio4/topk8; head remains dense.")
@@ -56,7 +84,8 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=False)
     module_path = Path(__file__).parent / "tests/qwen4exp-target-snapshot.py"
     module = load_module(module_path)
-    target = module.Target(json.loads(args.sample.read_text(encoding="utf-8")), geometry=args.geometry,
+    sample = read_csharp_sample(args.sample_csharp) if args.sample_csharp else json.loads(args.sample.read_text(encoding="utf-8"))
+    target = module.Target(sample, geometry=args.geometry,
                            attention_head_dim=args.attention_head_dim, attention_heads=args.attention_heads)
     b = target.base
     arrays = b.arrays
@@ -194,7 +223,10 @@ def main():
                   qsa=args.qsa, source_sha256=sha(__file__),
                   target_fixture_sha256=sha(module_path),
                   operator_fixture_sha256=sha(module_path.with_name("qwen4exp-mtp-operator.py")),
-                  sample_sha256=sha(args.sample), vocab=vocab, eos_token_id=257, context_length=1024,
+                  sample_sha256=sha(args.sample_csharp or args.sample),
+                  sample_format="csharp" if args.sample_csharp else "json",
+                  sample_source=str((args.sample_csharp or args.sample).resolve()),
+                  vocab=vocab, eos_token_id=257, context_length=1024,
                   files={p.name: dict(path=str(p.resolve()), bytes=p.stat().st_size, sha256=sha(p)) for p in (target_path, head_path)},
                   tensors={kind: {name: dict(shape=list(data.shape), dtype=str(data.dtype),
                       sha256=hashlib.sha256(data.tobytes()).hexdigest()) for name, data in values.items()}

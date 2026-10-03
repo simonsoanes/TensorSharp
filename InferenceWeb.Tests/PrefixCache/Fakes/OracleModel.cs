@@ -28,6 +28,8 @@ internal sealed record OracleTraits
     public int NativeSlotLimit { get; init; }
     public bool PrimaryResident { get; init; } = true;
     public bool AdoptPrimaryOnDisplacement { get; init; }
+    public bool DeferPrimaryConversion { get; init; }
+    public bool MeasurePrimaryFootprint { get; init; }
     public int MinRetainTokens { get; init; } = 8;
     public bool Persistable { get; init; }
     /// <summary>A forward leaves the state device-authoritative (a holder must be settled before a copy).</summary>
@@ -106,10 +108,11 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
     internal IPrefixPayloadSink? Sink { get; private set; }
     internal long StateMemberCalls { get; private set; }
     internal long SpareBytes { get; set; } = -1;
+    internal int PrimaryConversionCalls { get; private set; }
     internal List<(string Key, InvalidationReason Reason)> ReportedInvalidations { get; } = new();
 
     /// <summary>Makes the next call of <paramref name="operation"/> fail: clone, capture, donate,
-    /// return, convert, export, import, truncate, copy-paged.</summary>
+    /// return, convert, convert-throw, forward, export, import, truncate, copy-paged.</summary>
     internal void FailNext(string operation) => _faults.Add(operation);
 
     private bool Fault(string operation) => _faults.Remove(operation);
@@ -134,6 +137,7 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
             if ((uint)t >= (uint)Config.VocabSize) throw new ArgumentOutOfRangeException(nameof(tokens), t, "token outside the oracle vocabulary");
             cache.Append(t);
         }
+        if (Fault("forward")) throw new InvalidOperationException("The fixture failed after advancing model state.");
         cache.ForwardBoundaries.Add(cache.Length);
         if (Traits.RewindCheckpoint && tokens.Length > 1) cache.Checkpoint = cache.Length;
         if (!Traits.DeviceDirtyOnForward) cache.Flush();
@@ -457,6 +461,7 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
         EndState = Traits.EndState,
         CanCaptureCopy = Traits.CanCaptureCopy,
         AdoptPrimaryOnDisplacement = Traits.AdoptPrimaryOnDisplacement,
+        DeferPrimaryConversion = Traits.DeferPrimaryConversion,
         PrimaryResident = Traits.PrimaryResident,
         MinRetainTokens = Traits.MinRetainTokens,
         Truncation = Traits.Truncation,
@@ -520,9 +525,15 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
 
     public bool TryConvertPrimary(string payloadKey, int length, out PayloadFootprint footprint)
     {
+        PrimaryConversionCalls++;
         StateMemberCalls++;
         footprint = default;
         if (!Traits.AdoptPrimaryOnDisplacement) return false;
+        if (Fault("convert-throw"))
+        {
+            if (Traits.FailedConversionReleasesPrimary) _primary.TruncateTo(0, corrupt: false);
+            throw new OutOfMemoryException("The fixture cannot allocate a replacement primary cache.");
+        }
         if (Fault("convert"))
         {
             if (Traits.FailedConversionReleasesPrimary) _primary.TruncateTo(0, corrupt: false);
@@ -628,6 +639,14 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
         if (payloadKey != null && _keptSlots.TryGetValue(payloadKey, out var kept))
             return new PayloadFootprint(kept.Tokens, kept.Tokens, new ResourceVector { StateSnapshot = 1024 }, PositionDelta: 0);
         return payloadKey != null && _retained.TryGetValue(payloadKey, out OracleCache? cache) ? Measure(cache) : default;
+    }
+
+    public bool TryMeasurePrimaryEndState(int length, out PayloadFootprint footprint)
+    {
+        footprint = default;
+        if (!Traits.MeasurePrimaryFootprint || _activeKey is not null || _primary.Length != length) return false;
+        footprint = Measure(_primary);
+        return true;
     }
 
     private PayloadFootprint Measure(OracleCache cache)

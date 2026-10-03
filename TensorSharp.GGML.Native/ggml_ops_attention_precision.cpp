@@ -127,6 +127,33 @@ bool floating(const ggml_tensor * t) {
     return t && (t->type == GGML_TYPE_F32 || t->type == GGML_TYPE_F16 || t->type == GGML_TYPE_BF16);
 }
 
+void vision_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
+    const auto & d = *static_cast<tsg_dsv4_fused_desc *>(userdata);
+    const auto *q = dst->src[0], *k = dst->src[1], *v = dst->src[2];
+    const int64_t rows = q->ne[1] * q->ne[2] * q->ne[3], width = q->ne[0];
+    std::vector<double> scores(k->ne[1]);
+    for (int64_t row = rows * ith / nth; row < rows * (ith + 1) / nth; ++row) {
+        const int64_t head = row % q->ne[2], query = row / q->ne[2] % q->ne[1];
+        const int64_t batch = row / (q->ne[2] * q->ne[1]);
+        double maximum = -INFINITY, sum = 0;
+        for (int64_t key = 0; key < k->ne[1]; ++key) {
+            double dot = 0;
+            for (int64_t x = 0; x < width; ++x)
+                dot += double(read(q, x, query, head, batch)) * read(k, x, key, head, batch);
+            scores[key] = dot * d.f0;
+            maximum = std::max(maximum, scores[key]);
+        }
+        for (double & score : scores) { score = std::exp(score - maximum); sum += score; }
+        auto * output = static_cast<float *>(dst->data) + row * width;
+        for (int64_t x = 0; x < width; ++x) {
+            double value = 0;
+            for (int64_t key = 0; key < k->ne[1]; ++key)
+                value += scores[key] * read(v, x, key, head, batch);
+            output[x] = float(value / sum);
+        }
+    }
+}
+
 void softmax_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     const auto & d = *static_cast<tsg_dsv4_fused_desc *>(userdata);
     const auto *scores = dst->src[0], *mask = dst->src[1], *sinks = dst->src[2];
@@ -259,6 +286,20 @@ static ggml_tensor * attention_impl(ggml_context * ctx, ggml_tensor * q, ggml_te
 extern "C" ggml_tensor * tsg_attention_f32(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
     ggml_tensor * mask, ggml_tensor * sinks, float scale) {
     return attention_impl(ctx, q, k, v, mask, sinks, scale, 0);
+}
+
+extern "C" ggml_tensor * tsg_vision_attention_f32(ggml_context * ctx, ggml_tensor * q,
+    ggml_tensor * k, ggml_tensor * v, float scale) {
+    GGML_ASSERT(q && k && v && q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_F32 && v->type == GGML_TYPE_F32);
+    GGML_ASSERT(q->ne[0] == 72 && std::isfinite(scale) && q->ne[1] > 0 && k->ne[1] > 0);
+    GGML_ASSERT(k->ne[0] == q->ne[0] && v->ne[0] == q->ne[0] && v->ne[1] == k->ne[1]);
+    GGML_ASSERT(q->ne[2] == k->ne[2] && q->ne[2] == v->ne[2] && q->ne[3] == k->ne[3] && q->ne[3] == v->ne[3]);
+    auto * desc = new (ggml_new_buffer(ctx, sizeof(tsg_dsv4_fused_desc))) tsg_dsv4_fused_desc;
+    desc->kind = TSG_ATTN_VISION_F32;
+    desc->f0 = scale;
+    ggml_tensor * args[] = {q, k, v};
+    return ggml_custom_4d(ctx, GGML_TYPE_F32, q->ne[0], q->ne[2], q->ne[1], q->ne[3],
+        args, 3, vision_cpu, GGML_N_TASKS_MAX, desc);
 }
 
 extern "C" ggml_tensor * tsg_attention_f32_sparse(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,

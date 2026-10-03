@@ -668,17 +668,13 @@ namespace TensorSharp.Models
                     return false;
             }
 
-            // No VRAM-fit guard any more. It existed for the pre-flash graph that
-            // materialized an O(numPatches^2) score tensor (~4 GB at 7920 patches,
-            // 95 s WDDM-thrash next to a resident 12 GB model). Attention now runs
-            // through ggml flash_attn_ext (the vendored ggml-cuda has a head_dim=72
-            // kernel), so the per-encode budget is just a handful of
-            // [3*hidden, numPatches] activations (~0.3 GB at 7920 patches). The
-            // per-block fallback can never win post-flash: it caches the SAME
-            // ~1.6 GB of block weights resident (bind_w cacheable buffers), peaks
-            // on the same per-tensor activations, and is 5-15x slower (measured
-            // 2.7 s fused vs 47 s per-block at 7920 patches with 0.4 GB free —
-            // WDDM absorbs the scratch fine).
+            // Fuse all blocks while gallocr reuses their activation storage. On
+            // CUDA the default native attention uses bounded F32 score tiles
+            // and ordered writes into one output; CPU/Metal use upstream flash.
+            // TS_QWEN_VISION_F32=1 selects the owned streaming F32 CUDA kernel
+            // for 72-wide heads. Both CUDA paths avoid a full quadratic score
+            // allocation, but the ~1.6 GB of resident encoder weights and the
+            // language model's resident buffers can still cause WDDM paging.
 
             float attnScale = 1f / MathF.Sqrt(headDim);
             try

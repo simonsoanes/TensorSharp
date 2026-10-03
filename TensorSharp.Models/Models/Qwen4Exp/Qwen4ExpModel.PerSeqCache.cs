@@ -314,10 +314,14 @@ namespace TensorSharp.Models
             if (_fusedHolders.ContainsKey(requestId)) return;
 
             var holder = SnapshotActiveCache();
+            // A failed replacement must leave the live primary intact instead of
+            // publishing a checked-out holder without a primary to restore.
+            _fusedHolders.EnsureCapacity(checked(_fusedHolders.Count + 1));
+            var fresh = CreateFreshHolder();
             _fusedHolders[requestId] = holder;
             _activeFusedKey = requestId;
 
-            _primaryHolder = CreateFreshHolder();
+            _primaryHolder = fresh;
             // The adopted primary keeps slot base 0; the fresh primary takes a
             // fused-range base so the two never share span graph slots.
         }

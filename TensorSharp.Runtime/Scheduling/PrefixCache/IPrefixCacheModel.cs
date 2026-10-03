@@ -81,6 +81,15 @@ public interface IPrefixCacheModel
     /// Only when <see cref="PrefixCacheCapabilities.AdoptPrimaryOnDisplacement"/>.</summary>
     bool TryConvertPrimary(string payloadKey, int length, out PayloadFootprint footprint);
 
+    /// <summary>Side-effect free. Measures the exact live primary as a retained end state, before
+    /// conversion allocates its replacement. False means this family does not provide a measurement;
+    /// conversion then uses the existing best-effort path.</summary>
+    bool TryMeasurePrimaryEndState(int length, out PayloadFootprint footprint)
+    {
+        footprint = default;
+        return false;
+    }
+
     /// <summary>Clone: copy the payload into the request's private holder, settling a
     /// device-dirty payload first. Donate: re-key payload → request. Neither binds.</summary>
     bool TryMaterialize(in MaterializeRequest request);

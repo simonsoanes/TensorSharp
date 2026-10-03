@@ -296,9 +296,9 @@ rope 位置 = KV 下标 + delta，   delta = 位置表最后一行的最大分�
   - OpenAI，第 3 轮带图：`This digital artwork features an anime-style woman...` 变为
     `This image features an anime-style illustration of a young woman...`
   - Web UI，第 1 轮带图：96 token 内没有变化。
-- **复用。** 经过图片回合的缓存与重新 prefill 同一历史得到的状态不同，因此前缀缓存 Phase 0 让所有
-  复用路径止于第一张图片（`SupportsReuseAcrossMediaSpan = false`）。Qwen 3.5/3.6 现在声明为
-  `true`：后续回合越过图片续接缓存。
+- **复用。** 保存逐序列 rotary delta 后，后续回合可从精确的缓存端点越过相同图像或视频 span 续接。
+  radix 键同时校验媒体身份、span 边界与 token；改变媒体或会话 scope 后，不能使用该会话状态。
+  GDN 状态仍无法回退，因此较短的部分匹配需要重新 prefill。
 
 **验证。**
 
