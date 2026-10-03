@@ -68,14 +68,15 @@ SOURCE_BYTES="$(wc -c < "${SOURCE}")"
 # The tag goes in before </body>, not at the end, so the test is: take it out again
 # and what is left must be the app's own file byte for byte.
 python3 - "${TMP}" "${SOURCE}" <<'PYCHECK' || fail "GET / is not TensorAgent/src/TensorAgent.Maui/wwwroot/index.html plus one script tag"
-import sys
+import re, sys
 served = open(sys.argv[1], 'rb').read()
 source = open(sys.argv[2], 'rb').read()
-tag = b'\n<script src="/tensoragent.js"></script>\n'
-if tag not in served:
+head = rb'\n<style id="tensoragent-language-loading">body\{visibility:hidden\}</style>\n<script src="/i18n\.js\?lang=[A-Za-z-]+" onerror="document\.getElementById\(\x27tensoragent-language-loading\x27\)\.remove\(\)"></script>\n'
+tag = b'\n<link rel="stylesheet" href="/mask-editor.css">\n<script src="/mask-editor.js"></script>\n<script src="/tensoragent.js"></script>\n'
+if tag not in served or len(re.findall(head, served)) != 1:
     print('the companion script tag is missing', file=sys.stderr)
     sys.exit(1)
-if served.replace(tag, b'', 1) != source:
+if re.sub(head, b'', served, count=1).replace(tag, b'', 1) != source:
     print('the page differs from the Server\'s beyond the one added tag', file=sys.stderr)
     sys.exit(1)
 PYCHECK

@@ -12,6 +12,7 @@ using CoreGraphics;
 using Foundation;
 using ObjCRuntime;
 using TensorAgent.Sharing;
+using TensorAgent.Sharing.Localization;
 using UIKit;
 using UserNotifications;
 
@@ -48,14 +49,17 @@ public sealed class ShareViewController : UIViewController
     private static readonly UIColor Muted = UIColor.FromRGB(0x8d, 0x9a, 0xb8);
     private static readonly UIColor Accent = UIColor.FromRGB(0x5b, 0x8c, 0xff);
 
-    /// <summary>The one-tap prompts. First is the placeholder's own suggestion.</summary>
-    private static readonly (string Label, string Prompt)[] Presets =
+    /// <summary>
+    /// The one-tap prompts. First is the placeholder's own suggestion. Built with the sheet,
+    /// once its language is chosen: the prompt becomes the user's own message.
+    /// </summary>
+    private static (string Label, string Prompt)[] Presets() => new[]
     {
-        ("Summarize", "Summarize this and tell me what matters in it."),
-        ("Explain", "Explain this to me simply."),
-        ("Key points", "Pull out the key points as a short list."),
-        ("Action items", "What, if anything, do I need to do about this? Be specific."),
-        ("Translate", "Translate this into English. If it is already English, translate it into Chinese."),
+        (ShareStrings.T("share.preset.summarize.label"), ShareStrings.T("share.preset.summarize.prompt")),
+        (ShareStrings.T("share.preset.explain.label"), ShareStrings.T("share.preset.explain.prompt")),
+        (ShareStrings.T("share.preset.keyPoints.label"), ShareStrings.T("share.preset.keyPoints.prompt")),
+        (ShareStrings.T("share.preset.actionItems.label"), ShareStrings.T("share.preset.actionItems.prompt")),
+        (ShareStrings.T("share.preset.translate.label"), ShareStrings.T("share.preset.translate.prompt")),
     };
 
     private UITextView _prompt = null!;
@@ -73,6 +77,7 @@ public sealed class ShareViewController : UIViewController
     public override void ViewDidLoad()
     {
         base.ViewDidLoad();
+        UseAppLanguage();
         BuildUi();
         DescribeShare();
 
@@ -86,6 +91,24 @@ public sealed class ShareViewController : UIViewController
         // The keyboard up front: the whole point of the sheet is the sentence the user
         // is about to type, and a preset is one tap away whether or not it is showing.
         _prompt.BecomeFirstResponder();
+    }
+
+    /// <summary>
+    /// The language the app shows: the user's choice, which the app leaves in the App Group,
+    /// else the system's. Chosen before any text is built; if it cannot be, the sheet is
+    /// English rather than missing.
+    /// </summary>
+    private static void UseAppLanguage()
+    {
+        try
+        {
+            NSUrl? container = NSFileManager.DefaultManager.GetContainerUrl(ShareContainer.GroupIdentifier);
+            ShareStrings.UseChoiceIn(container?.Path, NSLocale.PreferredLanguages);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("TensorAgent.Share: the interface language could not be chosen: " + ex.Message);
+        }
     }
 
     // =====================================================================================
@@ -103,9 +126,9 @@ public sealed class ShareViewController : UIViewController
         bar.Translucent = false;
         bar.TitleTextAttributes = new UIStringAttributes { ForegroundColor = Foreground };
 
-        var title = new UINavigationItem("Ask TensorAgent");
+        var title = new UINavigationItem(ShareStrings.T("share.sheet.title"));
         title.LeftBarButtonItem = new UIBarButtonItem(UIBarButtonSystemItem.Cancel, (_, _) => Cancel());
-        _ask = new UIBarButtonItem("Ask", UIBarButtonItemStyle.Done, (_, _) => Send());
+        _ask = new UIBarButtonItem(ShareStrings.T("share.sheet.ask"), UIBarButtonItemStyle.Done, (_, _) => Send());
         title.RightBarButtonItem = _ask;
         bar.SetItems(new[] { title }, false);
         View.AddSubview(bar);
@@ -117,7 +140,7 @@ public sealed class ShareViewController : UIViewController
             Font = UIFont.SystemFontOfSize(13)!,
             Lines = 3,
             LineBreakMode = UILineBreakMode.TailTruncation,
-            Text = "Reading what you shared…",
+            Text = ShareStrings.T("share.sheet.reading"),
         };
 
         var promptCard = new UIView { TranslatesAutoresizingMaskIntoConstraints = false, BackgroundColor = Card };
@@ -132,7 +155,7 @@ public sealed class ShareViewController : UIViewController
             // scrolling box inside a sheet inside a share sheet is one scroll too many.
             ScrollEnabled = true,
             KeyboardAppearance = UIKeyboardAppearance.Dark,
-            Text = "What can you tell me about this?",
+            Text = ShareStrings.T("share.sheet.defaultQuestion"),
         };
         _prompt.Changed += (_, _) => _placeholder.Hidden = (_prompt.Text?.Length ?? 0) > 0;
         _placeholder = new UILabel
@@ -140,7 +163,7 @@ public sealed class ShareViewController : UIViewController
             TranslatesAutoresizingMaskIntoConstraints = false,
             TextColor = Muted,
             Font = UIFont.SystemFontOfSize(17)!,
-            Text = "Ask something about this (optional)",
+            Text = ShareStrings.T("share.sheet.questionPlaceholder"),
         };
         _placeholder.Hidden = true;
         promptCard.AddSubview(_prompt);
@@ -190,7 +213,7 @@ public sealed class ShareViewController : UIViewController
             Axis = UILayoutConstraintAxis.Horizontal,
             Spacing = 8,
         };
-        foreach ((string label, string prompt) in Presets)
+        foreach ((string label, string prompt) in Presets())
         {
             var chip = new UIButton(UIButtonType.System);
             chip.TranslatesAutoresizingMaskIntoConstraints = false;
@@ -296,11 +319,11 @@ public sealed class ShareViewController : UIViewController
         }
         if (items.Length > itemLimit)
             moreFiles = true;
-        string what = parts.Count > 0 ? string.Join(" · ", parts) : "What you shared";
+        string what = parts.Count > 0 ? string.Join(" · ", parts) : ShareStrings.T("share.summary.fallback");
         if (moreFiles)
-            _summary.Text = $"{what}  (many shared items)";
+            _summary.Text = ShareStrings.T("share.summary.many", ("what", what));
         else
-            _summary.Text = files > 0 ? $"{what}  ({files} file{(files == 1 ? "" : "s")})" : what;
+            _summary.Text = files > 0 ? ShareStrings.Plural("share.summary.files", files, ("what", what)) : what;
     }
 
     private static string Preview(NSAttributedString? value)
@@ -347,8 +370,8 @@ public sealed class ShareViewController : UIViewController
         {
             Console.WriteLine("TensorAgent.Share: " + ex);
             ShowFailure(ex is ShareInboxFullException
-                ? "TensorAgent's sharing inbox is full. Open TensorAgent to import the waiting items, then try again."
-                : "The item could not be saved. Please keep this sheet open and try again.");
+                ? ShareStrings.T("share.error.inboxFull")
+                : ShareStrings.T("share.error.saveFailed"));
             return;
         }
 
@@ -413,8 +436,8 @@ public sealed class ShareViewController : UIViewController
             {
                 using var content = new UNMutableNotificationContent
                 {
-                    Title = "Shared item ready",
-                    Body = "Tap to open TensorAgent and continue in chat.",
+                    Title = ShareStrings.T("share.notification.title"),
+                    Body = ShareStrings.T("share.notification.body"),
                 };
                 using UNTimeIntervalNotificationTrigger trigger =
                     UNTimeIntervalNotificationTrigger.CreateTrigger(1, false);
@@ -431,12 +454,12 @@ public sealed class ShareViewController : UIViewController
         }
 
         var alert = UIAlertController.Create(
-            "Saved to TensorAgent",
+            ShareStrings.T("share.saved.title"),
             notified
-                ? "Tap the TensorAgent notification to continue in chat."
-                : "Open TensorAgent to continue. iOS does not allow a Share extension to switch apps automatically.",
+                ? ShareStrings.T("share.saved.notified")
+                : ShareStrings.T("share.saved.openApp"),
             UIAlertControllerStyle.Alert);
-        alert.AddAction(UIAlertAction.Create("Done", UIAlertActionStyle.Default, _ =>
+        alert.AddAction(UIAlertAction.Create(ShareStrings.T("share.saved.done"), UIAlertActionStyle.Default, _ =>
             ExtensionContext?.CompleteRequest(Array.Empty<NSExtensionItem>(), null)));
         PresentViewController(alert, true, null);
     }

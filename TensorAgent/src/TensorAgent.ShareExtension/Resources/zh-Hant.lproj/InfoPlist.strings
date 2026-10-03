@@ -1,0 +1,3 @@
+/* Share sheet name; matches share.sheet.title. */
+"CFBundleDisplayName" = "詢問 TensorAgent";
+"CFBundleName" = "詢問 TensorAgent";

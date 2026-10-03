@@ -8,7 +8,10 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+using System.Globalization;
 using System.Text.Json.Serialization;
+using TensorAgent.Core.Localization;
+using TensorAgent.Sharing.Localization;
 
 namespace TensorAgent.Core.Sessions;
 
@@ -151,6 +154,27 @@ public sealed class Conversation
             return firstLine.Length <= 60 ? firstLine : firstLine[..57].TrimEnd() + "…";
         }
         return "Chat " + createdAt.ToLocalTime().ToString("MMM d, HH:mm");
+    }
+
+    /// <summary>
+    /// A title as the interface shows it. The date title <see cref="DeriveTitle"/> falls back
+    /// to is stored in English, as it always was, and shown in the interface language; any
+    /// other title is the user's own words or a file's name, and shows as it is.
+    /// </summary>
+    public static string DisplayTitle(string title, DateTimeOffset createdAt) =>
+        string.Equals(title, DeriveTitle(Array.Empty<StoredMessage>(), createdAt), StringComparison.Ordinal)
+            ? Loc.T("host.conversations.untitled", ("date", TitleDate(createdAt.ToLocalTime())))
+            : title;
+
+    /// <summary>The date in a date title: in English as it has always read ("Oct 2, 14:30"),
+    /// in any other language by its own month-day and time patterns ("10月2日 14:30").</summary>
+    private static string TitleDate(DateTimeOffset local)
+    {
+        DateTimeFormatInfo format = Loc.Culture.DateTimeFormat;
+        string pattern = Loc.Language == UiLanguages.English
+            ? "MMM d, HH:mm"
+            : format.MonthDayPattern + " " + format.ShortTimePattern;
+        return local.ToString(pattern, Loc.Culture);
     }
 
     /// <summary>Removes the "[File: name] … [End of file]" blocks the page prepends for

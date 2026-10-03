@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using TensorAgent.Core.Catalog;
 using TensorAgent.Core.Downloads;
 using TensorAgent.Core.JavaScript;
+using TensorAgent.Core.Localization;
 using TensorAgent.Core.Python;
 using TensorAgent.Core.Sessions;
 using TensorAgent.Core.Sharing;
@@ -103,6 +104,9 @@ public sealed class AgentAppHost : IDisposable
             paths.SettingsFile,
             paths.DeviceClass == DeviceClass.Desktop ? AppSettings.DesktopDefaults : null);
         AppSettings settings = Settings.Load();
+        // First, so every string built from here on -- the host's own messages, then the
+        // native screens and the page -- is in the language the user gets.
+        Localization.Loc.Apply(settings);
 
         Models = new ModelStore(paths.ModelsDirectory);
         // Weights whose catalog entry is gone -- the previous quantization of an entry
@@ -670,7 +674,7 @@ public sealed class AgentAppHost : IDisposable
             throw new WebUiRequestRejectedException(409, new
             {
                 code = "multiple_shared_drafts",
-                error = "Each shared item starts its own chat. Send or remove the current shared item before opening the next one.",
+                error = Loc.T("host.share.oneAtATime"),
             });
         }
 
@@ -682,7 +686,7 @@ public sealed class AgentAppHost : IDisposable
             throw new WebUiRequestRejectedException(409, new
             {
                 code = "multiple_shared_drafts",
-                error = "Each shared item starts its own chat. Send or remove the current shared item before opening the next one.",
+                error = Loc.T("host.share.oneAtATime"),
             });
         }
 
@@ -696,7 +700,7 @@ public sealed class AgentAppHost : IDisposable
                 throw new WebUiRequestRejectedException(409, new
                 {
                     code = "shared_draft_unavailable",
-                    error = "The shared draft changed before Send was accepted. Review the composer and try again.",
+                    error = Loc.T("host.share.draftChanged"),
                 });
             }
 
@@ -1246,8 +1250,7 @@ public sealed class AgentAppHost : IDisposable
                 attemptBody = WithTheAnswerSoFar(body, soFar);
                 yield return new
                 {
-                    restart = "The GPU was interrupted while the app was in the background. "
-                              + "Picking this answer up where it stopped.",
+                    restart = Loc.T("host.turn.restart.carryOn"),
                 };
             }
             else
@@ -1257,8 +1260,7 @@ public sealed class AgentAppHost : IDisposable
                 yield return new
                 {
                     replace = string.Empty,
-                    restart = "The GPU was taken away while the app was in the background. "
-                              + "Starting this answer again.",
+                    restart = Loc.T("host.turn.restart.fromTheTop"),
                 };
             }
         }
@@ -1700,7 +1702,7 @@ public sealed class AgentAppHost : IDisposable
                 if (!ModelService.UnloadModelAndRecreateBackend())
                 {
                     TraceBackground("the GPU backend could not be rebuilt; the model is not reloaded");
-                    SetModelLoad(ModelLoadState.Failed, "The GPU backend could not be rebuilt.");
+                    SetModelLoad(ModelLoadState.Failed, Loc.T("host.models.rebuildFailed"));
                     return false;
                 }
 
@@ -2050,7 +2052,10 @@ public sealed class AgentAppHost : IDisposable
         // with it and the next message is planned with or without delegation.
         Options.RepointMultiAgent(settings.MultiAgentEnabled);
         ApplySpeculationSetting(settings);
-        _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation("settings applied: {Engine}", DescribeEngine());
+        // The interface language: Loc raises Changed when it moves, and the native screens
+        // and the page follow it from there.
+        Localization.Loc.Apply(settings);
+        _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation("settings applied: {Engine}", DescribeEngineForLog());
     }
 
     /// <summary>
@@ -2113,19 +2118,33 @@ public sealed class AgentAppHost : IDisposable
     /// </summary>
     public string DescribeEngine()
     {
-        var parts = new List<string>
-        {
-            _embeddedBackend?.Describe() ?? $"native process shell ({Backend.Shell?.Name ?? "unavailable"}); "
-                + string.Join(", ", CodeEnvironment.AvailableTools),
-        };
+        // The embedded backend describes itself (Shell/, whose words stay as they are);
+        // everything said here is in the interface language.
+        var parts = new List<string> { _embeddedBackend?.Describe() ?? DescribeProcessShell() };
         // Asked of the runner rather than of the field, because the runner is always
         // there now and it is its answer -- read live from CodeExec.Enabled -- that
         // decides whether the model is offered the tools at all.
-        parts.Add(CodeRunner is { CanRun: true } ? "code execution on" : "code execution off");
-        parts.Add(CodeExec.AllowNetwork ? "network on" : "network off");
-        parts.Add($"{Skills.Skills.Count} skills");
+        parts.Add(CodeRunner is { CanRun: true } ? Loc.T("host.engine.codeOn") : Loc.T("host.engine.codeOff"));
+        parts.Add(CodeExec.AllowNetwork ? Loc.T("host.engine.networkOn") : Loc.T("host.engine.networkOff"));
+        parts.Add(Loc.T("host.engine.skills", ("count", Skills.Skills.Count)));
         return string.Join(" · ", parts);
+
+        string DescribeProcessShell()
+        {
+            string tools = string.Join(", ", CodeEnvironment.AvailableTools);
+            return Backend.Shell is { } shell
+                ? Loc.T("host.engine.processShell", ("shell", shell.Name), ("tools", tools))
+                : Loc.T("host.engine.processShellUnavailable", ("tools", tools));
+        }
     }
+
+    /// <summary>The same line in English, whatever the interface language, for the logs.</summary>
+    public string DescribeEngineForLog() => string.Join(" · ",
+        _embeddedBackend?.Describe() ?? $"native process shell ({Backend.Shell?.Name ?? "unavailable"}); "
+            + string.Join(", ", CodeEnvironment.AvailableTools),
+        CodeRunner is { CanRun: true } ? "code execution on" : "code execution off",
+        CodeExec.AllowNetwork ? "network on" : "network off",
+        $"{Skills.Skills.Count} skills");
 
     /// <summary>
     /// Run a handful of representative commands through the real backend and report
@@ -2482,7 +2501,8 @@ public sealed class AgentAppHost : IDisposable
 
                 if (!File.Exists(weights))
                 {
-                    var missing = new FileNotFoundException($"{model.DisplayName} is not downloaded yet.", weights);
+                    var missing = new FileNotFoundException(
+                        Loc.T("host.models.notDownloaded", ("model", model.DisplayName)), weights);
                     SetModelLoad(ModelLoadState.Failed, missing.Message);
                     throw missing;
                 }
@@ -2496,7 +2516,7 @@ public sealed class AgentAppHost : IDisposable
                 {
                     string path = Models.PathFor(model, requiredProjector);
                     var missing = new FileNotFoundException(
-                        $"{model.DisplayName}'s image projector is not downloaded yet.", path);
+                        Loc.T("host.models.projectorNotDownloaded", ("model", model.DisplayName)), path);
                     SetModelLoad(ModelLoadState.Failed, missing.Message);
                     throw missing;
                 }
@@ -2512,7 +2532,7 @@ public sealed class AgentAppHost : IDisposable
                     && Models.StateOf(model) != InstallState.Installed)
                 {
                     var incomplete = new FileNotFoundException(
-                        $"{model.DisplayName} is not completely downloaded yet.", Models.DirectoryFor(model));
+                        Loc.T("host.models.incomplete", ("model", model.DisplayName)), Models.DirectoryFor(model));
                     SetModelLoad(ModelLoadState.Failed, incomplete.Message);
                     throw incomplete;
                 }
@@ -2615,9 +2635,9 @@ public sealed class AgentAppHost : IDisposable
                 if (loaded is null)
                 {
                     if (refusals.Count == 0)
-                        refusals.Add("no GPU backend in this build, and a video model is not run on the CPU");
+                        refusals.Add(Loc.T("host.models.noGpuForVideo"));
                     var refused = new InvalidOperationException(
-                        $"{model.DisplayName} could not be loaded on any backend this build offers:"
+                        Loc.T("host.models.loadRefused", ("model", model.DisplayName))
                         + Environment.NewLine + "  " + string.Join(Environment.NewLine + "  ", refusals));
                     SetModelLoad(ModelLoadState.Failed, refused.Message);
                     throw refused;
@@ -2790,7 +2810,7 @@ public sealed class AgentAppHost : IDisposable
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             HostLog.LogWarning(ex, "preparing the LoRA plug-ins failed");
-            return ImageTurns.Preparation.Refused("The LoRA plug-ins could not be prepared: " + ex.Message);
+            return ImageTurns.Preparation.Refused(Loc.T("host.loras.prepareFailed", ("reason", ex.Message)));
         }
     }
 

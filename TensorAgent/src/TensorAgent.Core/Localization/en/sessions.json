@@ -1,0 +1,8 @@
+{
+  "sessions.title": "Chats",
+  "sessions.newChat": "New chat",
+  "sessions.row.datePattern": "MMM d, HH:mm",
+  "sessions.row.messages.one": "{count} message",
+  "sessions.row.messages.other": "{count} messages",
+  "sessions.row.delete": "Delete"
+}

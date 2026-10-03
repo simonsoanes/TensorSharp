@@ -10,6 +10,7 @@
 
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using TensorAgent.Core.Localization;
 using TensorSharp.Chat;
 using TensorSharp.Models.Video;
 
@@ -73,7 +74,7 @@ public static class VideoTurns
 
         IVideoGenerationModel? model = chat.LoadedVideoModel;
         VideoRequest request = model is null
-            ? VideoRequest.Refused("The loaded model does not make video.")
+            ? VideoRequest.Refused(Loc.T("host.video.notVideoModel"))
             : Read(body, model);
         if (request.Error is not null)
         {
@@ -200,7 +201,7 @@ public static class VideoTurns
         // The page puts a document's text in front of the message, where it would become the
         // clip's script; a video model takes words, pictures, clips and sounds, not files.
         if (Paths(user, "textFilePaths").Length > 0)
-            return VideoRequest.Refused("A video is made from a description, not from a document: remove the attached file and describe the clip.");
+            return VideoRequest.Refused(Loc.T("host.video.noDocuments"));
 
         // Stills only for photos: a clip's sampled frames are in imagePaths as well, and
         // they are not a picture the user chose.
@@ -215,8 +216,7 @@ public static class VideoTurns
             int count = photos.Length + clips.Length + sounds.Length;
             int max = model.MaxReferenceImages;
             if (max > 0 && count > max)
-                return VideoRequest.Refused(
-                    $"This model takes up to {max} references - photos, clips and sounds together - and {count} are attached.");
+                return VideoRequest.Refused(Loc.T("host.video.tooManyReferences", ("max", max), ("count", count)));
             if (photos.Length > 0)
                 payload["referenceImages"] = photos;
             if (clips.Length > 0)
@@ -229,9 +229,8 @@ public static class VideoTurns
         if (clips.Length > 0 || sounds.Length > 0)
         {
             return VideoRequest.Refused(model.VideoModelFamily == "minimax-h3"
-                ? "This model makes a clip from a description and photos only. To build one around a video or a "
-                  + "sound, choose MiniMax-H3 References on the Models page."
-                : "This model makes a clip from a description and photos only; remove the video or sound.");
+                ? Loc.T("host.video.photosOnlyUseReferences")
+                : Loc.T("host.video.photosOnly"));
         }
 
         int photoLimit = !model.SupportsImageConditioning ? 0 : model.SupportsEndImageConditioning ? 2 : 1;
@@ -239,9 +238,9 @@ public static class VideoTurns
         {
             return VideoRequest.Refused(photoLimit switch
             {
-                0 => "This model makes a clip from a description only; remove the photos.",
-                1 => "This model starts a clip from one photo; attach just one.",
-                _ => "Attach one photo to start the clip from, or two for its first and last frames.",
+                0 => Loc.T("host.video.descriptionOnly"),
+                1 => Loc.T("host.video.onePhoto"),
+                _ => Loc.T("host.video.oneOrTwoPhotos"),
             });
         }
         if (photos.Length > 0)
@@ -251,7 +250,7 @@ public static class VideoTurns
         return VideoRequest.For(payload);
     }
 
-    private const string Describe = "Describe the video you want.";
+    private static string Describe => Loc.T("host.video.describe");
 
     private static string? Text(JsonElement element, string name) =>
         element.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;

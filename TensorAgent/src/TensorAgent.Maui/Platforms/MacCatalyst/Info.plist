@@ -39,6 +39,23 @@
 		<true/>
 	</dict>
 
+	<!-- The interface's languages, the same list as UiLanguages.Supported. The usage
+	     strings below are translated in Resources/<tag>.lproj/InfoPlist.strings, and the
+	     list is also what lets macOS show its own controls in the app in those languages. -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh-Hans</string>
+		<string>zh-Hant</string>
+		<string>ja</string>
+		<string>ko</string>
+		<string>es</string>
+		<string>fr</string>
+		<string>de</string>
+	</array>
+
 	<!-- Usage strings for attaching pictures and audio and for dictation. macOS asks the
 	     user the first time each is used and shows these strings when it does. -->
 	<key>NSCameraUsageDescription</key>

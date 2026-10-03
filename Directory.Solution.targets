@@ -39,7 +39,7 @@
            only.
 
        A head is skipped with a warning naming what is missing and what provides it when the
-       SDK running this build lacks one of the app's workloads (GetSuggestedWorkloads is the
+       SDK selected for the app lacks one of its workloads (GetSuggestedWorkloads is the
        SDK's own check; the head restores every target framework it has on this OS, so a
        missing one stops all of them), when the iOS simulator app's GgmlOps.xcframework or
        staged CPython is absent, or when the native build is skipped and a desktop head's
@@ -56,12 +56,22 @@
          iOS SDK picks its default simulator from the machine's architecture. -->
     <_TensorAgentAppProcessArch>$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant())</_TensorAgentAppProcessArch>
     <_TensorAgentAppMachineArch>$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant())</_TensorAgentAppMachineArch>
-    <!-- The child runs on the SDK that answered the workload check: the dotnet that started
-         this build, or else the one this MSBuild belongs to. -->
-    <_TensorAgentDotnet>$(DOTNET_HOST_PATH)</_TensorAgentDotnet>
+    <!-- Match the Apple build scripts: DOTNET_ROOT, then the user-local ~/.dotnet SDK.
+         The system SDK may have older Apple workloads than the installed Xcode. Both the
+         workload probe and the app build must run on the selected SDK. An explicit
+         TensorAgentDotnet overrides this choice; elsewhere use the solution's SDK. -->
+    <_TensorAgentDotnet>$(TensorAgentDotnet)</_TensorAgentDotnet>
+    <_TensorAgentDotnet Condition="'$(_TensorAgentDotnet)' == '' And $([MSBuild]::IsOSPlatform('OSX')) And '$(DOTNET_ROOT)' != '' And Exists('$(DOTNET_ROOT)/dotnet')">$(DOTNET_ROOT)/dotnet</_TensorAgentDotnet>
+    <_TensorAgentDotnet Condition="'$(_TensorAgentDotnet)' == '' And $([MSBuild]::IsOSPlatform('OSX')) And Exists('$(HOME)/.dotnet/dotnet')">$(HOME)/.dotnet/dotnet</_TensorAgentDotnet>
+    <_TensorAgentDotnet Condition="'$(_TensorAgentDotnet)' == ''">$(DOTNET_HOST_PATH)</_TensorAgentDotnet>
     <_TensorAgentDotnet Condition="'$(_TensorAgentDotnet)' == '' And Exists('$(MSBuildBinPath)/../../dotnet')">$([MSBuild]::NormalizePath('$(MSBuildBinPath)/../../dotnet'))</_TensorAgentDotnet>
     <_TensorAgentDotnet Condition="'$(_TensorAgentDotnet)' == '' And Exists('$(MSBuildBinPath)/../../dotnet.exe')">$([MSBuild]::NormalizePath('$(MSBuildBinPath)/../../dotnet.exe'))</_TensorAgentDotnet>
     <_TensorAgentDotnet Condition="'$(_TensorAgentDotnet)' == ''">dotnet</_TensorAgentDotnet>
+    <!-- MSBuild exports these paths to child processes. Remove them so a different
+         dotnet installation selects its own SDK imports and out-of-process task host.
+         Assigning empty Exec environment values leaves empty SDK path properties. -->
+    <_TensorAgentAppCommandPrefix Condition="!$([MSBuild]::IsOSPlatform('Windows'))">env -u MSBUILD_EXE_PATH -u MSBuildExtensionsPath -u MSBuildSDKsPath -u DOTNET_HOST_PATH </_TensorAgentAppCommandPrefix>
+    <_TensorAgentAppCommandPrefix Condition="$([MSBuild]::IsOSPlatform('Windows'))">set &quot;MSBUILD_EXE_PATH=&quot; &amp; set &quot;MSBuildExtensionsPath=&quot; &amp; set &quot;MSBuildSDKsPath=&quot; &amp; set &quot;DOTNET_HOST_PATH=&quot; &amp; </_TensorAgentAppCommandPrefix>
     <!-- A native build skipped for the solution stays skipped for the app; the desktop heads
          otherwise bring the engine library up to date themselves. -->
     <_TensorAgentAppNativeSkipped Condition="'$(TensorSharpSkipGgmlNative)' == 'true' Or '$(TENSORSHARP_GGML_NATIVE_SKIP)' == 'true'">true</_TensorAgentAppNativeSkipped>
@@ -147,7 +157,7 @@
           Condition="'$(SolutionFileName)' == 'TensorSharp.slnx'"
           DependsOnTargets="_ResolveTensorAgentAppHeads;CleanTensorAgentAppHead" />
 
-  <!-- The heads this machine has whose workloads the SDK running this build provides. -->
+  <!-- The heads this machine has whose workloads the selected app SDK provides. -->
   <Target Name="_ResolveTensorAgentAppHeads">
     <Message Condition="'@(_TensorAgentAppTargetFramework)' == ''" Importance="normal"
              Text="TensorAgent: the app has macOS and Windows heads only; none is built on this OS." />
@@ -156,14 +166,19 @@
     <Message Condition="$([MSBuild]::IsOSPlatform('OSX')) And '$(_TensorAgentAppMachineArch)' != 'arm64'" Importance="normal"
              Text="TensorAgent: the iOS simulator app is built on Apple silicon only; GgmlOps.xcframework's simulator slice is arm64." />
 
-    <MSBuild Condition="'@(_TensorAgentAppTargetFramework)' != '' And '$(TensorSharpSkipTensorAgentApp)' != 'true'"
-             Projects="$(_TensorAgentAppProject)"
-             Targets="GetSuggestedWorkloads"
-             Properties="TargetFramework=%(_TensorAgentAppTargetFramework.Identity)">
-      <Output TaskParameter="TargetOutputs" ItemName="_TensorAgentAppMissingWorkload" />
-    </MSBuild>
+    <Message Condition="'@(_TensorAgentAppTargetFramework)' != '' And '$(TensorSharpSkipTensorAgentApp)' != 'true'"
+             Importance="high" Text="TensorAgent: using $(_TensorAgentDotnet) for the app workload check and build." />
+    <Exec Condition="'@(_TensorAgentAppTargetFramework)' != '' And '$(TensorSharpSkipTensorAgentApp)' != 'true'"
+          Command="$(_TensorAgentAppCommandPrefix)&quot;$(_TensorAgentDotnet)&quot; msbuild &quot;$(MSBuildThisFileDirectory)eng/TensorAgentAppWorkloadProbe.proj&quot; -nologo -v:minimal -tl:off -p:Platform=AnyCPU &quot;-p:TensorAgentAppProject=$(_TensorAgentAppProject)&quot; -p:TargetFramework=%(_TensorAgentAppTargetFramework.Identity)"
+          WorkingDirectory="$(MSBuildThisFileDirectory)"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" ItemName="_TensorAgentAppProbeOutput" />
+    </Exec>
     <ItemGroup>
-      <_TensorAgentAppMissingWorkloadId Include="@(_TensorAgentAppMissingWorkload->Distinct())" />
+      <_TensorAgentAppMissingWorkload Include="@(_TensorAgentAppProbeOutput)"
+                                      Condition="$([System.String]::Copy('%(Identity)').Trim().StartsWith('TENSORAGENT_MISSING_WORKLOAD='))" />
+      <_TensorAgentAppMissingWorkloadId Include="@(_TensorAgentAppMissingWorkload->Trim()->Replace('TENSORAGENT_MISSING_WORKLOAD=', '')->Distinct())" />
       <_TensorAgentAppAvailableHead Include="@(_TensorAgentAppHead)"
                                     Condition="'$(TensorSharpSkipTensorAgentApp)' != 'true' And '@(_TensorAgentAppMissingWorkloadId)' == ''" />
     </ItemGroup>
@@ -179,9 +194,9 @@
       <_TensorAgentAppMissingMaui Condition="'@(_TensorAgentAppMissingWorkloadId)' != '' And '@(_TensorAgentAppForeignWorkload)' == ''">true</_TensorAgentAppMissingMaui>
     </PropertyGroup>
     <Warning Condition="'@(_TensorAgentAppMissingWorkloadId)' != '' And '$(_TensorAgentAppMissingMaui)' == 'true'"
-             Text="TensorAgent: app skipped. The .NET SDK running this build ($(MSBuildBinPath)) does not have the @(_TensorAgentAppMissingWorkloadId, ', ') workload(s) that TensorAgent/src/TensorAgent.Maui needs on this OS. Build with an SDK that has them (TensorAgent/README.md, Build and run), or add them to this one with 'dotnet workload install @(_TensorAgentAppMissingWorkloadId, ' ')'; -p:TensorSharpSkipTensorAgentApp=true skips the app without this warning." />
+             Text="TensorAgent: app skipped. The app SDK ($(_TensorAgentDotnet)) does not have the @(_TensorAgentAppMissingWorkloadId, ', ') workload(s) that TensorAgent/src/TensorAgent.Maui needs on this OS. Set TensorAgentDotnet to an SDK that has them (TensorAgent/README.md, Build and run), or add them to this one with '&quot;$(_TensorAgentDotnet)&quot; workload install @(_TensorAgentAppMissingWorkloadId, ' ')'; -p:TensorSharpSkipTensorAgentApp=true skips the app without this warning." />
     <Warning Condition="'@(_TensorAgentAppMissingWorkloadId)' != '' And '$(_TensorAgentAppMissingMaui)' != 'true'"
-             Text="TensorAgent: app skipped. The .NET SDK running this build ($(MSBuildBinPath)) cannot provide the .NET MAUI workloads that TensorAgent/src/TensorAgent.Maui needs on this OS (it suggests @(_TensorAgentAppMissingWorkloadId, ', ')). Build with an SDK that has them (TensorAgent/README.md, Build and run); -p:TensorSharpSkipTensorAgentApp=true skips the app without this warning." />
+             Text="TensorAgent: app skipped. The app SDK ($(_TensorAgentDotnet)) cannot provide the .NET MAUI workloads that TensorAgent/src/TensorAgent.Maui needs on this OS (it suggests @(_TensorAgentAppMissingWorkloadId, ', ')). Set TensorAgentDotnet to an SDK that has them (TensorAgent/README.md, Build and run); -p:TensorSharpSkipTensorAgentApp=true skips the app without this warning." />
   </Target>
 
   <!-- Of those, the heads whose prerequisites are there. -->
@@ -202,7 +217,7 @@
              Text="TensorAgent: building the %(_TensorAgentAppBuildHead.DisplayName) (%(_TensorAgentAppBuildHead.Identity), $(Configuration))" />
     <!-- The child's own errors are logged as it prints them; the exit code is reported once
          below, with the head it belongs to, instead of as MSB3073. -->
-    <Exec Command="&quot;$(_TensorAgentDotnet)&quot; build &quot;$(_TensorAgentAppProject)&quot; -f %(_TensorAgentAppBuildHead.Identity) %(_TensorAgentAppBuildHead.Arguments) $(_TensorAgentAppBuildArguments) $(_TensorAgentAppArguments)"
+    <Exec Command="$(_TensorAgentAppCommandPrefix)&quot;$(_TensorAgentDotnet)&quot; build &quot;$(_TensorAgentAppProject)&quot; -f %(_TensorAgentAppBuildHead.Identity) %(_TensorAgentAppBuildHead.Arguments) $(_TensorAgentAppBuildArguments) $(_TensorAgentAppArguments)"
           WorkingDirectory="$(MSBuildThisFileDirectory)"
           EnvironmentVariables="$(_TensorAgentAppEnvironment)"
           StandardOutputImportance="high"
@@ -229,7 +244,7 @@
           Condition="'@(_TensorAgentAppAvailableHead)' != ''">
     <Message Importance="high"
              Text="TensorAgent: cleaning the %(_TensorAgentAppAvailableHead.DisplayName) (%(_TensorAgentAppAvailableHead.Identity), $(Configuration))" />
-    <Exec Command="&quot;$(_TensorAgentDotnet)&quot; clean &quot;$(_TensorAgentAppProject)&quot; -f %(_TensorAgentAppAvailableHead.Identity) %(_TensorAgentAppAvailableHead.Arguments) $(_TensorAgentAppArguments)"
+    <Exec Command="$(_TensorAgentAppCommandPrefix)&quot;$(_TensorAgentDotnet)&quot; clean &quot;$(_TensorAgentAppProject)&quot; -f %(_TensorAgentAppAvailableHead.Identity) %(_TensorAgentAppAvailableHead.Arguments) $(_TensorAgentAppArguments)"
           WorkingDirectory="$(MSBuildThisFileDirectory)"
           StandardOutputImportance="high"
           ContinueOnError="WarnAndContinue" />

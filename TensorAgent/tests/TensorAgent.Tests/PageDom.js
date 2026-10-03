@@ -72,6 +72,13 @@
     if (at >= 0) this.parentNode.children.splice(at, 1);
     this.parentNode = null;
   };
+  Element.prototype.removeChild = function (child) {
+    var at = this.children.indexOf(child);
+    if (at < 0) throw new Error('Node is not a child');
+    this.children.splice(at, 1);
+    child.parentNode = null;
+    return child;
+  };
   Element.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
   Element.prototype.getAttribute = function (k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; };
   Element.prototype.removeAttribute = function (k) { delete this.attrs[k]; };
@@ -86,6 +93,8 @@
 
   function matches(el, selector) {
     if (selector.charAt(0) === '.') return el.classList.contains(selector.slice(1));
+    // [name]: the attribute selectors /i18n.js translates the markup with.
+    if (selector.charAt(0) === '[') return el.getAttribute(selector.slice(1, -1)) !== null;
     return el.tagName === selector.toUpperCase();
   }
   Element.prototype.querySelectorAll = function (selector) {
