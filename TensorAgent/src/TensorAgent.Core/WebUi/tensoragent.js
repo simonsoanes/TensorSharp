@@ -3141,6 +3141,13 @@
     text.style.height = Math.min(text.scrollHeight, window.innerHeight * 0.26) + 'px';
   }
   text.addEventListener('input', autoGrow);
+  text.addEventListener('keydown', function (e) {
+    // Let Shift+Enter insert a newline and IME Enter finish composing text.
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    // The Send button becomes Stop during inference; Enter should never stop it.
+    if (!e.repeat && !state.generating) sendMessage();
+  });
   send.addEventListener('click', sendMessage);
   $('new').addEventListener('click', function () { openConversation(null); });
 
