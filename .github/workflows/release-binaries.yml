@@ -370,18 +370,14 @@ jobs:
             }
           }
 
-      - name: Stage Windows desktop resources and Visual C++ runtime
+      - name: Stage Windows desktop Visual C++ runtime and licenses
         if: ${{ runner.os == 'Windows' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force publish/desktop/webui | Out-Null
-          Copy-Item TensorAgent/src/TensorAgent.Maui/wwwroot/* publish/desktop/webui/ -Recurse -Force
-          # Build output content must also survive dotnet publish.
-          $skills = "TensorAgent/src/TensorAgent.Maui/bin/Release/net10.0-windows10.0.19041.0/win-x64/skills"
-          if (-not (Test-Path $skills)) { throw "Bundled skills not found: $skills" }
-          New-Item -ItemType Directory -Force publish/desktop/skills | Out-Null
-          Copy-Item "$skills/*" publish/desktop/skills/ -Recurse -Force
+          # The MAUI Content items publish webui/ and skills/ directly into
+          # publish/desktop, where the packager validates them. Do not copy from
+          # bin/: MSVC's Platform=x64 environment changes it to bin/x64/.
           # vcvars may select a newer v14 redist alongside the pinned compiler.
           # Bundle a complete release CRT family; never mix folders.
           $crtRoot = Join-Path $env:VCToolsRedistDir "x64"
