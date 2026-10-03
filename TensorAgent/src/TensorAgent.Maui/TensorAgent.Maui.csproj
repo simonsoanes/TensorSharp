@@ -333,6 +333,13 @@
   </Target>
 
   <ItemGroup Condition="'$(TensorAgentPlatform)' == 'maccatalyst'">
+    <!-- Binary distributions retain the engine's license and third-party notices
+         inside the app, including the ZIP/PKG variants without a readme beside it. -->
+    <BundleResource Include="../../../LICENSE" Link="licenses/TensorSharp.txt" />
+    <BundleResource Include="../../../ExternalProjects/ggml/LICENSE" Link="licenses/ggml.txt"
+                    Condition="Exists('../../../ExternalProjects/ggml/LICENSE')" />
+    <BundleResource Include="../../../TensorSharp.Chat/Jev/Apache-2.0.txt;../../../TensorSharp.Chat/Jev/NOTICE.md"
+                    Link="licenses/Jev/%(Filename)%(Extension)" />
     <!-- A dynamic NativeReference: the SDK copies it into Contents/MonoBundle beside the
          managed assemblies, rewrites its install name for that location and signs it
          with the app. -->

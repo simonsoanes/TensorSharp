@@ -18,7 +18,7 @@
 - **Text and code embeddings.** GGUF BERT/XLM-R encoders with OpenAI/Ollama batch embedding APIs for Snowflake Arctic Embed and MiniLM; see the [embedding guide](docs/embeddings.md).
 - **Measured performance.** TensorSharp is benchmarked against `llama.cpp` on identical models and hardware. Results are specific to the measured model, backend, and workload. See [Benchmarks](docs/benchmarks.md).
 - **Agentic work.** `TensorSharp.AgentHost` adds bounded Agent Skills, code tools, and [automatic subagent delegation](docs/multi_agent.md) with independent contexts, private workspaces, dependency scheduling, and read-only defaults.
-- **TensorAgent for phones and desktops.** One app for local chat, multimodal input, code and document work, image generation/editing, and short video with audio. Its twelve-model catalog is gated by system RAM tier; image/video generation models need desktop memory tiers. Qwen3.8 Flash Next offers experimental UD-IQ1_M with optional vision from 32 GB system RAM alongside text-only UD-Q2_K_XL from 48 GB. The interface supports English, Simplified and Traditional Chinese, Japanese, Korean, Spanish, French and German. See [TensorAgent](TensorAgent/README.md) for source builds, platform differences and measured coverage.
+- **TensorAgent for phones and desktops.** One app for local chat, multimodal input, code and document work, image generation/editing, and short video with audio. Its twelve-model catalog is gated by system RAM tier; image/video generation models need desktop memory tiers. Qwen3.8 Flash Next offers experimental UD-IQ1_M with optional vision from 32 GB system RAM alongside text-only UD-Q2_K_XL from 48 GB. The interface supports English, Simplified and Traditional Chinese, Japanese, Korean, Spanish, French and German. Start with the [Mac and Windows download/install guide](docs/tensoragent_desktop.md), or see [TensorAgent](TensorAgent/README.md) for source builds, platform differences and measured coverage.
 - **Production-friendly building blocks.** Continuous batching and the paged, Radix prefix-shared KV cache are on by default; speculative decoding, tensor parallelism, and configurable security boundaries are available when you need them. See [Features](FEATURES.md), [Usage](USAGE.md), and the [current project status](docs/PROJECT_STATUS.md).
 
 ## Supported model families at a glance
@@ -30,7 +30,7 @@
 
 Backend, modality, feature support, and validation coverage vary by model. See the [supported models](docs/supported_models.md) tables, the [model cards](docs/models/README.md), and the [embedding guide](docs/embeddings.md) for details.
 
-Recent source additions include Qwen-Image-2.1 masked edits with exact protected pixels and optional processing of the selected region, twelve TensorAgent LoRA plug-ins for speed, style and editing, and Qwen3.8 Flash Next on a 48 GB Mac using SSD-backed weights. Multi-GPU `--layer-split` and `--tp` are separate controls; support and performance depend on the architecture and quantization. These source features may be ahead of the published CLI/server packages; TensorAgent currently requires a source build.
+Recent source additions include Qwen-Image-2.1 masked edits with exact protected pixels and optional processing of the selected region, twelve TensorAgent LoRA plug-ins for speed, style and editing, and Qwen3.8 Flash Next on a 48 GB Mac using SSD-backed weights. Multi-GPU `--layer-split` and `--tp` are separate controls; support and performance depend on the architecture and quantization. These source features may be ahead of published packages; Desktop installers appear in releases built with the updated Release Binaries workflow, while older releases may lack them.
 
 ## Learn with the books
 
@@ -45,7 +45,20 @@ Recent source additions include Qwen-Image-2.1 masked edits with exact protected
 
 ## Quick Start
 
-Prefer a prebuilt application? The [Releases page](https://github.com/zhongkaifu/TensorSharp/releases) provides self-contained CLI and Server archives for Windows x64 (CPU/CUDA), Linux x64 (CPU/CUDA), and macOS arm64.
+### TensorAgent Desktop: download, install, chat
+
+**[Download the latest release](https://github.com/zhongkaifu/TensorSharp/releases/latest)** and expand **Assets**. Choose a file beginning with `tensoragent-desktop-`:
+
+| Platform | Download and install |
+|---|---|
+| **macOS 14+ on Apple Silicon** | `tensoragent-desktop-<version>-osx-arm64.dmg`: open and drag TensorAgent to Applications. A PKG installer and ZIP are also available. |
+| **Windows x64** | `tensoragent-desktop-<version>-win-x64-cpu.msi`, or `win-x64-cuda.msi` for a compatible NVIDIA GPU/driver: install and open TensorAgent from Start. ZIPs are also available. |
+
+The app includes its .NET runtime and native engine. Windows needs [WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) if missing; Python/Node are optional tools for skills. The current built-in catalog needs at least **12 GB system RAM**, and model weights download separately. Open **☰ → Models → Download → Use**, then type a message. The [Desktop user guide](docs/tensoragent_desktop.md) covers package verification, unsigned-app prompts, first-run setup, attachments, skills, updates and troubleshooting. Historical releases may have no Desktop assets until a release runs the updated workflow; iPhone/iPad remain [source builds](TensorAgent/README.md#build-and-run).
+
+### TensorSharp CLI and server
+
+The [Releases page](https://github.com/zhongkaifu/TensorSharp/releases) also provides self-contained CLI and Server archives for Windows x64 (CPU/CUDA), Linux x64 (CPU/CUDA), and macOS arm64.
 
 To build from source you need the full **.NET 10 SDK** ([how to install it](docs/getting_started.md#install-and-first-run)), `git`, `curl`, [CMake](https://cmake.org/download/) 3.20+, and the toolchain for your GPU. Then run the verified [Gemma 4 E4B](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf) model (7.48 GiB). On Windows with an NVIDIA GPU (PowerShell):
 
@@ -125,6 +138,7 @@ New here? The sections above are all you need to get running. Everything else is
 
 | Doc | What's inside |
 |---|---|
+| [TensorAgent Desktop user guide](docs/tensoragent_desktop.md) | Mac/Windows downloads, DMG/PKG/MSI/ZIP installation, model setup, first chat, attachments, skills, updates and troubleshooting |
 | [TensorSharp and TensorAgent book guide](docs/BOOK.md) | Building LLM Inference Engines and Agentic Runtimes from Scratch, plus From Tensors to Tokens: introductions, Amazon links, and repository reading paths |
 | [Getting started](docs/getting_started.md) | The full first-run guide: the .NET SDK on each platform, every backend, multi-GPU and multi-node runs, NVIDIA DGX Spark, embeddings, choosing a backend, and making it fast |
 | [Supported models](docs/supported_models.md) | Implemented model families and their validation scope: example GGUFs, modalities, thinking, tools, and speculative decoding |
@@ -154,7 +168,7 @@ Actively developed, and the source tree runs ahead of the published packages.
 | Area | Where it stands |
 |---|---|
 | Models | A dozen autoregressive families plus text diffusion, image generation and editing, and video with audio. See [Supported models](docs/supported_models.md). |
-| Inference hosts | CLI, Web UI, Ollama- and OpenAI-compatible APIs, and the TensorAgent app for iPhone, iPad, Mac and Windows. TensorAgent is source-only. |
+| Inference hosts | CLI, Web UI, Ollama- and OpenAI-compatible APIs, and TensorAgent for iPhone, iPad, Mac and Windows. The release workflow packages Mac/Windows Desktop; historical releases may lack those assets. iPhone/iPad use source builds. |
 | Backends | Pure C# CPU, direct CUDA/cuBLAS, MLX Metal, and GGML CPU/Metal/CUDA/Vulkan, with per-architecture exceptions. |
 | Serving features | Continuous batching with a shared prefix cache, speculative decoding, tensor parallelism, structured output, and tool calling. |
 | Agentic work | Agent Skills, sandboxed file and shell tools, and bounded sub-agents. See [Agent Skills](docs/agent_skills.md) and [Multiple agents](docs/multi_agent.md). |

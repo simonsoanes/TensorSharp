@@ -18,7 +18,7 @@
 - **文本与代码嵌入。** GGUF BERT/XLM-R 编码器，兼容 OpenAI/Ollama 的批量嵌入 API，支持 Snowflake Arctic Embed 与 MiniLM；见[嵌入指南](docs/embeddings_zh-cn.md)。
 - **性能经过实测。** TensorSharp 在相同模型与硬件上对比 `llama.cpp`；结果对应所测的模型、后端与工作负载。详见[性能数据](docs/benchmarks_zh-cn.md)。
 - **智能体工作。** `TensorSharp.AgentHost` 提供有界的 Agent Skills、代码工具与[自动子智能体委派](docs/multi_agent.md)（英文），子智能体拥有独立上下文、私有工作区、依赖调度，并默认只读。
-- **手机与桌面上的 TensorAgent。** 同一个应用支持本地聊天、多模态输入、代码与文档工作、图像生成与编辑，以及带音频的短视频。内置十二项模型，按系统内存档位限制加载；图像和视频生成模型需要较高内存档位。Qwen3.8 Flash Next 提供实验性的 UD-IQ1_M（32 GB 系统内存起，可选视觉投影器）以及仅支持文本的 UD-Q2_K_XL（48 GB 起）。界面支持英语、简体中文、繁体中文、日语、韩语、西班牙语、法语和德语。源码构建、平台差异及实际验证范围见 [TensorAgent](TensorAgent/README.md)。
+- **手机与桌面上的 TensorAgent。** 同一个应用支持本地聊天、多模态输入、代码与文档工作、图像生成与编辑，以及带音频的短视频。内置十二项模型，按系统内存档位限制加载；图像和视频生成模型需要较高内存档位。Qwen3.8 Flash Next 提供实验性的 UD-IQ1_M（32 GB 系统内存起，可选视觉投影器）以及仅支持文本的 UD-Q2_K_XL（48 GB 起）。界面支持英语、简体中文、繁体中文、日语、韩语、西班牙语、法语和德语。先看 [Mac / Windows 下载与安装指南](docs/tensoragent_desktop_zh-cn.md)，源码构建、平台差异及实际验证范围见 [TensorAgent](TensorAgent/README.md)。
 - **可扩展的工程能力。** 连续批处理与分页、Radix 前缀共享 KV 缓存默认开启；投机解码、张量并行和可配置的安全边界按需启用。详见[功能说明](FEATURES_zh-cn.md)、[使用指南](USAGE_zh-cn.md)与[当前状态](docs/PROJECT_STATUS_zh-cn.md)。
 
 ## 支持的模型家族一览
@@ -30,7 +30,7 @@
 
 各模型的后端、模态、功能支持与验证覆盖范围不同，详见[支持的模型](docs/supported_models_zh-cn.md)各表、[模型卡片](docs/models/README_zh-cn.md)及[嵌入指南](docs/embeddings_zh-cn.md)。
 
-近期源码增加了 Qwen-Image-2.1 蒙版编辑：保留保护区域的精确像素，并可仅处理选中区域；TensorAgent 提供十二款加速、风格与编辑 LoRA 插件；Qwen3.8 Flash Next 可在 48 GB Mac 上使用 SSD 支持的权重路径运行。多 GPU 的 `--layer-split` 与 `--tp` 是独立选项，支持范围和性能取决于架构与量化格式。这些源码功能可能领先于已发布的 CLI / Server 包；TensorAgent 目前需要从源码构建。
+近期源码增加了 Qwen-Image-2.1 蒙版编辑：保留保护区域的精确像素，并可仅处理选中区域；TensorAgent 提供十二款加速、风格与编辑 LoRA 插件；Qwen3.8 Flash Next 可在 48 GB Mac 上使用 SSD 支持的权重路径运行。多 GPU 的 `--layer-split` 与 `--tp` 是独立选项，支持范围和性能取决于架构与量化格式。这些源码功能可能领先于已发布的包；更新后的 Release Binaries 工作流会在新发布中提供桌面安装包，历史发布可能不包含这些资源。
 
 ## 配合书籍学习
 
@@ -45,7 +45,20 @@
 
 ## 快速开始
 
-更愿意使用预构建应用？[Releases 页面](https://github.com/zhongkaifu/TensorSharp/releases)提供自包含的 Windows x64（CPU/CUDA）、Linux x64（CPU/CUDA）与 macOS arm64 CLI / Server 归档。
+### TensorAgent 桌面版：下载、安装、聊天
+
+**[下载最新发布](https://github.com/zhongkaifu/TensorSharp/releases/latest)**，展开 **Assets**，选择以 `tensoragent-desktop-` 开头的文件：
+
+| 平台 | 下载与安装 |
+|---|---|
+| **macOS 14+，Apple Silicon** | `tensoragent-desktop-<version>-osx-arm64.dmg`：打开并把 TensorAgent 拖到“应用程序”。也提供 PKG 安装程序和 ZIP。 |
+| **Windows x64** | `tensoragent-desktop-<version>-win-x64-cpu.msi`，兼容 NVIDIA GPU / 驱动时选择 `win-x64-cuda.msi`：安装后从“开始”打开 TensorAgent。也提供 ZIP。 |
+
+应用包含 .NET 运行库与原生引擎；Windows 如缺少 [WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)，需另外安装。Python / Node 是技能所需的可选工具。当前内置模型至少需要 **12 GB 系统内存**，权重在应用内另外下载。打开 **☰ → 模型 → 下载 → 使用**，即可输入消息。[桌面版用户指南](docs/tensoragent_desktop_zh-cn.md)包含安装包校验、未签名应用提示、首次配置、附件、技能、更新与故障排查。历史发布可能没有桌面资源，需等待更新后的工作流运行发布；iPhone / iPad 仍使用[源码构建](TensorAgent/README.md#build-and-run)。
+
+### TensorSharp CLI 与服务端
+
+[Releases 页面](https://github.com/zhongkaifu/TensorSharp/releases)还提供自包含的 Windows x64（CPU/CUDA）、Linux x64（CPU/CUDA）与 macOS arm64 CLI / Server 归档。
 
 从源码构建需要完整的 **.NET 10 SDK**（[各平台安装方法](docs/getting_started_zh-cn.md#安装与首次运行)）、`git`、`curl`、[CMake](https://cmake.org/download/) 3.20+，以及所选 GPU 的工具链。然后运行已验证的 [Gemma 4 E4B](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf) 模型（7.48 GiB）。在 Windows + NVIDIA GPU 上（PowerShell）：
 
@@ -125,6 +138,7 @@ TensorSharp 与 `llama.cpp` 在同一块 NVIDIA RTX 3080 Laptop GPU（16 GB）�
 
 | 文档 | 内容 |
 |---|---|
+| [TensorAgent 桌面版用户指南](docs/tensoragent_desktop_zh-cn.md) | Mac / Windows 下载、DMG / PKG / MSI / ZIP 安装、模型配置、首次聊天、附件、技能、更新与故障排查 |
 | [TensorSharp 与 TensorAgent 书籍指南](docs/BOOK_zh-cn.md) | 《Building LLM Inference Engines and Agentic Runtimes from Scratch》与《From Tensors to Tokens》：书籍介绍、Amazon 链接与仓库伴读路线 |
 | [快速上手指南](docs/getting_started_zh-cn.md) | 完整的首次运行指南：各平台的 .NET SDK、所有后端、多 GPU 与多节点运行、NVIDIA DGX Spark、嵌入服务、后端选择与提速 |
 | [支持的模型](docs/supported_models_zh-cn.md) | 已实现的模型家族与实际验证范围：示例 GGUF、模态、思维链、工具与投机解码 |
@@ -154,7 +168,7 @@ TensorSharp 与 `llama.cpp` 在同一块 NVIDIA RTX 3080 Laptop GPU（16 GB）�
 | 范围 | 当前情况 |
 |---|---|
 | 模型 | 十余个自回归家族，另有文本扩散、图像生成与编辑，以及带音频的视频生成。见[支持的模型](docs/supported_models_zh-cn.md)。 |
-| 推理宿主 | CLI、Web UI、兼容 Ollama 与 OpenAI 的 API，以及 iPhone、iPad、Mac 和 Windows 上的 TensorAgent 应用。TensorAgent 目前仅提供源码构建。 |
+| 推理宿主 | CLI、Web UI、兼容 Ollama 与 OpenAI 的 API，以及 iPhone、iPad、Mac 和 Windows 上的 TensorAgent 应用。发布工作流打包 Mac / Windows 桌面版，历史发布可能没有对应资源；iPhone / iPad 使用源码构建。 |
 | 后端 | 纯 C# CPU、Direct CUDA/cuBLAS、MLX Metal，以及 GGML CPU/Metal/CUDA/Vulkan，各架构另有例外。 |
 | 服务能力 | 带共享前缀缓存的连续批处理、投机解码、张量并行、结构化输出与工具调用。 |
 | 智能体能力 | Agent Skills、沙箱化的文件与 shell 工具，以及有界的子智能体。见 [Agent Skills](docs/agent_skills.md)（英文）与[多智能体](docs/multi_agent.md)（英文）。 |
