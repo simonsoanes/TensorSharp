@@ -88,6 +88,10 @@ public sealed class LoopbackWebHost : IDisposable
             DevicePaths(), WebRoot, loggerFactory, python, javaScript,
             backends: BackendsFor(Compute.Selection));
 
+        // Which language the interface came up in, and from what: the line a person reads
+        // when the app shows a language they did not expect.
+        Console.WriteLine($"TensorAgent: interface language {Core.Localization.Loc.Language.Tag} " +
+            $"(saved choice '{_host.Settings.Load().UiLanguage}', system {string.Join(",", Core.Localization.Loc.SystemLanguages())})");
 #if IOS
         // The one part of a download that needs iOS: staying alive for a while after
         // the user leaves the app, and picking itself up when they come back.
@@ -97,6 +101,10 @@ public sealed class LoopbackWebHost : IDisposable
         _backgroundGeneration = new Platforms.iOS.BackgroundGeneration(_host);
         _shareInbox = new Platforms.iOS.ShareInbox(_host);
         _loopbackLifecycle = new Platforms.iOS.LoopbackLifecycle(_host);
+        // The share extension speaks the language the user chose here; Settings writes it
+        // again whenever it changes. Written at every launch so an install that predates the
+        // file, or an App Group that was reset, catches up.
+        Platforms.iOS.SharedContainer.WriteLanguageChoice(_host.Settings.Load().UiLanguage);
 #else
         // A desktop keeps working behind other windows; it only has to say that it is,
         // or App Nap and idle sleep slow the model down or stop it. See DesktopActivity.

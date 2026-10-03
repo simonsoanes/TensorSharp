@@ -8,6 +8,8 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+using TensorAgent.Core.Localization;
+
 namespace TensorAgent.Maui.Services;
 
 /// <summary>
@@ -30,8 +32,7 @@ internal sealed class Dictation : IDisposable
     public static bool IsSupported => false;
 
     /// <summary>What the page says instead of listening.</summary>
-    public const string UnsupportedMessage =
-        "The app does not dictate on Windows: press Windows+H in the message box to use Windows voice typing.";
+    public static string UnsupportedMessage => Loc.T("app.dictation.unsupportedWindows");
 
     public static Task<string?> RequestPermissionsAsync() => Task.FromResult<string?>(UnsupportedMessage);
 

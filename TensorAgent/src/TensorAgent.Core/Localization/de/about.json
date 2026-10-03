@@ -1,0 +1,13 @@
+{
+  "about.title": "Über",
+  "about.tagline": "Ein privater KI-Assistent, der vollständig auf diesem Gerät läuft.",
+  "about.private.heading": "Alles geschieht hier",
+  "about.private.body": "Das Modell läuft auf der GPU dieses iPhones. Deine Gespräche, angehängten Dateien und alles, was der Assistent schreibt, bleiben im Speicher der App. Für Antworten wird nichts an einen Server gesendet, und die App funktioniert auch ohne Netzwerk.",
+  "about.abilities.heading": "Was er kann",
+  "about.abilities.body": "Chatten und lesen, was du ihm gibst: Bilder, Audio, Videos und Dokumente. Er kann Code in einer Sandbox schreiben und ausführen, mit Agent Skills echte PDFs, Tabellen, Word-Dokumente und Präsentationen erstellen und mit deiner Erlaubnis im Web suchen.",
+  "about.control.heading": "Du bestimmst, was er darf",
+  "about.control.body": "Codeausführung und Netzwerkzugriff haben eigene Schalter in den Einstellungen; beide sind zunächst aus. Code ist auf den Ordner des aktuellen Chats beschränkt. Wenn das Netzwerk aus ist, gilt das auch für den Code des Assistenten.",
+  "about.builtOn.heading": "Auf TensorSharp aufgebaut",
+  "about.builtOn.body": "TensorAgent basiert auf TensorSharp, einer quelloffenen .NET-Engine für große Sprach- und Diffusionsmodelle mit einem Metal-Backend für Apple-GPUs. Dieselbe Engine betreibt TensorSharp.Server auf dem Desktop.",
+  "about.engine.unavailable": "Engine-Details nicht verfügbar: {error}"
+}

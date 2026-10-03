@@ -8,7 +8,11 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Serialization;
+using TensorAgent.Core.Localization;
+using TensorAgent.Sharing.Localization;
 
 namespace TensorAgent.Core.Sessions;
 
@@ -23,6 +27,10 @@ public sealed class StoredMessage
     [JsonPropertyName("role")] public string Role { get; set; } = "user";
     [JsonPropertyName("content")] public string Content { get; set; } = string.Empty;
     [JsonPropertyName("thinking")] public string? Thinking { get; set; }
+    /// <summary>The model's terminal turn counters, preserved for the performance footer.</summary>
+    [JsonPropertyName("stats")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public StoredTurnStats? Stats { get; set; }
     [JsonPropertyName("imagePaths")] public List<string>? ImagePaths { get; set; }
     [JsonPropertyName("stillImagePaths")] public List<string>? StillImagePaths { get; set; }
     [JsonPropertyName("maskPath")] public string? MaskPath { get; set; }
@@ -74,6 +82,53 @@ public sealed class StoredMessage
             if (!string.IsNullOrEmpty(AudioUrl)) yield return Path.GetFileName(AudioUrl);
         }
     }
+}
+
+/// <summary>Performance counters from a text turn's terminal Web UI frame.</summary>
+public sealed class StoredTurnStats
+{
+    [JsonPropertyName("tokenCount")] public int TokenCount { get; set; }
+    [JsonPropertyName("elapsed")] public double Elapsed { get; set; }
+    [JsonPropertyName("tokPerSec")] public double TokensPerSecond { get; set; }
+    [JsonPropertyName("promptTokens")] public int? PromptTokens { get; set; }
+    [JsonPropertyName("kvReusedTokens")] public int? KvReusedTokens { get; set; }
+    [JsonPropertyName("kvReusePercent")] public double? KvReusePercent { get; set; }
+    [JsonPropertyName("aborted")] public bool Aborted { get; set; }
+    [JsonPropertyName("truncated")] public bool Truncated { get; set; }
+
+    /// <summary>
+    /// Keep the server's counters as reported. Synthetic failure frames without
+    /// counters must not create an invented footer; media's zero-token placeholder
+    /// counters are excluded when the completed message is recorded.
+    /// </summary>
+    internal static StoredTurnStats? FromDoneFrame(JsonElement frame)
+    {
+        if (!frame.TryGetProperty("done", out JsonElement done) || done.ValueKind != JsonValueKind.True
+            || Integer(frame, "tokenCount") is not { } tokens
+            || Number(frame, "elapsed") is not { } elapsed
+            || Number(frame, "tokPerSec") is not { } speed)
+            return null;
+
+        return new StoredTurnStats
+        {
+            TokenCount = tokens,
+            Elapsed = elapsed,
+            TokensPerSecond = speed,
+            PromptTokens = Integer(frame, "promptTokens"),
+            KvReusedTokens = Integer(frame, "kvReusedTokens"),
+            KvReusePercent = Number(frame, "kvReusePercent"),
+            Aborted = frame.TryGetProperty("aborted", out JsonElement aborted) && aborted.ValueKind == JsonValueKind.True,
+            Truncated = frame.TryGetProperty("truncated", out JsonElement truncated) && truncated.ValueKind == JsonValueKind.True,
+        };
+    }
+
+    private static int? Integer(JsonElement frame, string name) =>
+        frame.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out int number) && number >= 0 ? number : null;
+
+    private static double? Number(JsonElement frame, string name) =>
+        frame.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.Number
+        && value.TryGetDouble(out double number) && double.IsFinite(number) && number >= 0 ? number : null;
 }
 
 /// <summary>What the Web UI's attachment chip knows about an upload.</summary>
@@ -151,6 +206,27 @@ public sealed class Conversation
             return firstLine.Length <= 60 ? firstLine : firstLine[..57].TrimEnd() + "…";
         }
         return "Chat " + createdAt.ToLocalTime().ToString("MMM d, HH:mm");
+    }
+
+    /// <summary>
+    /// A title as the interface shows it. The date title <see cref="DeriveTitle"/> falls back
+    /// to is stored in English, as it always was, and shown in the interface language; any
+    /// other title is the user's own words or a file's name, and shows as it is.
+    /// </summary>
+    public static string DisplayTitle(string title, DateTimeOffset createdAt) =>
+        string.Equals(title, DeriveTitle(Array.Empty<StoredMessage>(), createdAt), StringComparison.Ordinal)
+            ? Loc.T("host.conversations.untitled", ("date", TitleDate(createdAt.ToLocalTime())))
+            : title;
+
+    /// <summary>The date in a date title: in English as it has always read ("Oct 2, 14:30"),
+    /// in any other language by its own month-day and time patterns ("10月2日 14:30").</summary>
+    private static string TitleDate(DateTimeOffset local)
+    {
+        DateTimeFormatInfo format = Loc.Culture.DateTimeFormat;
+        string pattern = Loc.Language == UiLanguages.English
+            ? "MMM d, HH:mm"
+            : format.MonthDayPattern + " " + format.ShortTimePattern;
+        return local.ToString(pattern, Loc.Culture);
     }
 
     /// <summary>Removes the "[File: name] … [End of file]" blocks the page prepends for

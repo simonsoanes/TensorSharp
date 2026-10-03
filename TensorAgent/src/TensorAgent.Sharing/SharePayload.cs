@@ -10,6 +10,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using TensorAgent.Sharing.Localization;
 
 namespace TensorAgent.Sharing;
 
@@ -196,13 +197,14 @@ public sealed class SharePayload
         if (Notes.Count > MaxNotes)
         {
             Notes.RemoveRange(MaxNotes - 1, Notes.Count - (MaxNotes - 1));
-            Notes.Add("Additional share warnings were omitted.");
+            Notes.Add(ShareStrings.T("share.note.warningsOmitted"));
             shortened = true;
         }
-        if (shortened && Notes.Count < MaxNotes
-            && !Notes.Contains("Some shared metadata was shortened to fit safely.", StringComparer.Ordinal))
+        if (shortened && Notes.Count < MaxNotes)
         {
-            Notes.Add("Some shared metadata was shortened to fit safely.");
+            string note = ShareStrings.T("share.note.metadataShortened");
+            if (!Notes.Contains(note, StringComparer.Ordinal))
+                Notes.Add(note);
         }
         return shortened;
 

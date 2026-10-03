@@ -1,0 +1,4 @@
+"NSCameraUsageDescription" = "TensorAgent は、デバイス上のモデルに見せたい写真を撮影するためにカメラを使用します。";
+"NSMicrophoneUsageDescription" = "TensorAgent は、メッセージの音声入力と、デバイス上のモデルに渡す音声の添付のためにマイクを使用します。";
+"NSPhotoLibraryUsageDescription" = "TensorAgent は、会話に添付するために選択した写真と動画を読み取ります。";
+"NSSpeechRecognitionUsageDescription" = "TensorAgent は、音声入力を文字に起こしてメッセージ欄に入力します。";

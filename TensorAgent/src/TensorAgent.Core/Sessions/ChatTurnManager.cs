@@ -361,6 +361,7 @@ public sealed class ChatTurnManager : IDisposable
         var artifactUrls = new HashSet<string>(StringComparer.Ordinal);
         string? sessionId = null;
         string? imageUrl = null, videoUrl = null, audioUrl = null;
+        StoredTurnStats? stats = null;
         ChatTurnState state;
 
         try
@@ -368,7 +369,7 @@ public sealed class ChatTurnManager : IDisposable
             await foreach (object frame in frames(turn.Token).WithCancellation(turn.Token).ConfigureAwait(false))
             {
                 turn.Append(frame, content, MaxBufferedFrames);
-                ReadInto(frame, content, thinking, artifacts, artifactUrls, ref sessionId, ref imageUrl, ref videoUrl, ref audioUrl);
+                ReadInto(frame, content, thinking, artifacts, artifactUrls, ref sessionId, ref imageUrl, ref videoUrl, ref audioUrl, ref stats);
             }
             state = ChatTurnState.Completed;
         }
@@ -412,7 +413,8 @@ public sealed class ChatTurnManager : IDisposable
                     artifacts.Count == 0 ? null : artifacts,
                     imageUrl,
                     videoUrl,
-                    audioUrl);
+                    audioUrl,
+                    stats);
             }
             catch (Exception) { /* a lost transcript must not be a crash on a background thread */ }
         }
@@ -442,7 +444,8 @@ public sealed class ChatTurnManager : IDisposable
         ref string? sessionId,
         ref string? imageUrl,
         ref string? videoUrl,
-        ref string? audioUrl)
+        ref string? audioUrl,
+        ref StoredTurnStats? stats)
     {
         try
         {
@@ -451,6 +454,8 @@ public sealed class ChatTurnManager : IDisposable
             JsonElement root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
                 return;
+            if (root.TryGetProperty("done", out JsonElement done) && done.ValueKind == JsonValueKind.True)
+                stats = StoredTurnStats.FromDoneFrame(root);
             if (root.TryGetProperty("token", out JsonElement token) && token.GetString() is { } piece)
                 content.Append(piece);
             else if (root.TryGetProperty("replace", out JsonElement replace) && replace.GetString() is { } whole)
@@ -463,7 +468,10 @@ public sealed class ChatTurnManager : IDisposable
             // that died is not part of the answer that replaced it. (An empty `replace`
             // rides on the same frame when the answer itself starts over.)
             if (root.TryGetProperty("restart", out _))
+            {
                 thinking.Clear();
+                stats = null;
+            }
 
             // A tool's ordinary `files` field is provisional: a guarded workflow can
             // produce a syntactically valid-looking file and then reject it for stale

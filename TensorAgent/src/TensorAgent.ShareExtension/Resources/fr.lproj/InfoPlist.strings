@@ -1,0 +1,4 @@
+/* The extension's name in the share sheet: the same text as share.sheet.title in
+   TensorAgent.Sharing/Localization/<tag>/share.json. */
+"CFBundleDisplayName" = "Demander à TensorAgent";
+"CFBundleName" = "Demander à TensorAgent";

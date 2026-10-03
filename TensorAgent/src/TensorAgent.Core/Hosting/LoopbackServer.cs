@@ -758,7 +758,7 @@ public sealed class LoopbackServer : IDisposable
             try
             {
                 if (!response.SendChunked && response.ContentLength64 == 0)
-                    await LoopbackResponse.Json(new { error = "The server failed to handle the request." }, 500).WriteAsync(ctx, _cts.Token).ConfigureAwait(false);
+                    await LoopbackResponse.Json(new { error = Localization.Loc.T("host.server.failed") }, 500).WriteAsync(ctx, _cts.Token).ConfigureAwait(false);
             }
             catch { /* headers already sent */ }
         }
@@ -1022,6 +1022,10 @@ public sealed class LoopbackServer : IDisposable
         // the bundle so it can never drift from the code that expects it.
         if (relative == CompanionScriptName)
             return LoopbackResponse.Text(CompanionScript.Value, contentType: "text/javascript; charset=utf-8");
+        // The page's strings in the language the app is showing, built per request from the
+        // tables the native screens read (PageStrings).
+        if (relative == Localization.PageStrings.ScriptName)
+            return LoopbackResponse.Text(Localization.PageStrings.Script(), contentType: "text/javascript; charset=utf-8");
         if (relative is "mask-editor.js" or "mask-editor.css")
         {
             using Stream stream = typeof(LoopbackServer).Assembly
@@ -1077,13 +1081,21 @@ public sealed class LoopbackServer : IDisposable
     private static byte[] WithCompanionScript(string indexPath)
     {
         byte[] html = File.ReadAllBytes(indexPath);
+        // Load the strings before the body is parsed, and keep it hidden until the
+        // runtime translates it. A failed script reveals the bundled English fallback.
+        byte[] head = Encoding.UTF8.GetBytes("\n<style id=\"tensoragent-language-loading\">body{visibility:hidden}</style>\n"
+            + Localization.PageStrings.Tag() + "\n");
+        html = InsertBefore(html, head, "</head>"u8, prependWhenMissing: true);
         byte[] tag = Encoding.UTF8.GetBytes("\n<link rel=\"stylesheet\" href=\"/mask-editor.css\">\n"
             + "<script src=\"/mask-editor.js\"></script>\n<script src=\"/" + CompanionScriptName + "\"></script>\n");
-        ReadOnlySpan<byte> close = "</body>"u8;
+        return InsertBefore(html, tag, "</body>"u8);
+    }
 
+    private static byte[] InsertBefore(byte[] html, byte[] tag, ReadOnlySpan<byte> close, bool prependWhenMissing = false)
+    {
         int at = html.AsSpan().LastIndexOf(close);
         if (at < 0)
-            at = html.Length;
+            at = prependWhenMissing ? 0 : html.Length;
 
         byte[] page = new byte[html.Length + tag.Length];
         html.AsSpan(0, at).CopyTo(page);

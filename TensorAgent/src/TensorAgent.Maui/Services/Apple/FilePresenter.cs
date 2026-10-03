@@ -10,6 +10,7 @@
 
 using Foundation;
 using QuickLook;
+using TensorAgent.Core.Localization;
 using UIKit;
 
 namespace TensorAgent.Maui.Services;
@@ -43,7 +44,7 @@ internal static class FilePresenter
     public static async Task<string?> PresentAsync(string fullPath, string? displayName)
     {
         if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath))
-            return "That file is no longer available.";
+            return Loc.T("app.openFile.missing");
 
         try
         {

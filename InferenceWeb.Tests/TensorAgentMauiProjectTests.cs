@@ -490,14 +490,14 @@ public class TensorAgentMauiProjectTests
         // so this is the one that matters: the phone-specific Web UI. It deliberately
         // differs from the desktop Server page while speaking the same loopback API.
         XElement bundle = Assert.Single(Csproj.Descendants(Ns + "BundleResource"),
-            e => e.Attribute("Include")!.Value.Replace('\\', '/') == "wwwroot/**/*");
+            e => e.Attribute("Include")?.Value.Replace('\\', '/') == "wwwroot/**/*");
         Assert.StartsWith("webui/", bundle.Attribute("Link")?.Value.Replace('\\', '/'));
 
         string page = Path.Combine(MauiDir, "wwwroot", "index.html");
         Assert.True(File.Exists(page), "TensorAgent.Maui must carry its phone-specific index.html.");
         Assert.DoesNotContain(
             Csproj.Descendants(Ns + "BundleResource"),
-            e => e.Attribute("Include")!.Value.Replace('\\', '/')
+            e => (e.Attribute("Include")?.Value ?? string.Empty).Replace('\\', '/')
                 .Contains("TensorSharp.Server/wwwroot", StringComparison.Ordinal));
     }
 
@@ -511,7 +511,7 @@ public class TensorAgentMauiProjectTests
         // its first step. The csproj excludes such a skill by name because MSBuild cannot
         // read verdicts.json; this keeps the two equal.
         XElement bundle = Assert.Single(Csproj.Descendants(Ns + "BundleResource"),
-            e => e.Attribute("Include")!.Value.Replace('\\', '/') == "../../skills/**/*" && IsFor(e, "ios"));
+            e => e.Attribute("Include")?.Value.Replace('\\', '/') == "../../skills/**/*" && IsFor(e, "ios"));
         Assert.StartsWith("skills/", bundle.Attribute("Link")?.Value.Replace('\\', '/'));
 
         string[] excludes = (bundle.Attribute("Exclude")?.Value ?? string.Empty)
@@ -580,9 +580,9 @@ public class TensorAgentMauiProjectTests
         // hosts do, so the skills the phone excludes are exactly the ones they are for.
         XDocument doc = Csproj;
         XElement mac = Assert.Single(doc.Descendants(Ns + "BundleResource"),
-            e => e.Attribute("Include")!.Value.Replace('\\', '/') == "../../skills/**/*" && IsFor(e, "maccatalyst"));
+            e => e.Attribute("Include")?.Value.Replace('\\', '/') == "../../skills/**/*" && IsFor(e, "maccatalyst"));
         XElement windows = Assert.Single(doc.Descendants(Ns + "Content"),
-            e => e.Attribute("Include")!.Value.Replace('\\', '/') == "../../skills/**/*" && IsFor(e, "windows"));
+            e => e.Attribute("Include")?.Value.Replace('\\', '/') == "../../skills/**/*" && IsFor(e, "windows"));
         Assert.Equal("PreserveNewest", windows.Attribute("CopyToOutputDirectory")?.Value);
 
         foreach (XElement item in new[] { mac, windows })
@@ -603,7 +603,7 @@ public class TensorAgentMauiProjectTests
 
         // And the Web UI beside them, from the same wwwroot.
         Assert.Single(doc.Descendants(Ns + "Content"),
-            e => e.Attribute("Include")!.Value.Replace('\\', '/') == "wwwroot/**/*" && IsFor(e, "windows"));
+            e => e.Attribute("Include")?.Value.Replace('\\', '/') == "wwwroot/**/*" && IsFor(e, "windows"));
     }
 
     [Fact]

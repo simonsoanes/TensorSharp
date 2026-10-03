@@ -1,0 +1,13 @@
+{
+  "about.title": "Acerca de",
+  "about.tagline": "Un asistente de IA privado que funciona completamente en este dispositivo.",
+  "about.private.heading": "Todo ocurre aquí",
+  "about.private.body": "El modelo funciona en la GPU de este iPhone. Tus conversaciones, los archivos que adjuntas y todo lo que escribe el asistente permanecen en el almacenamiento de la app. No se envía nada a un servidor para obtener respuestas, y la app funciona sin conexión a la red.",
+  "about.abilities.heading": "Lo que puede hacer",
+  "about.abilities.body": "Conversar y leer lo que le proporcionas: imágenes, audio, vídeos y documentos. Puede escribir y ejecutar código en un entorno aislado, usar Agent Skills para crear archivos PDF, hojas de cálculo, documentos Word y presentaciones, y buscar en la web cuando lo permites.",
+  "about.control.heading": "Tú decides qué puede hacer",
+  "about.control.body": "La ejecución de código y el acceso a la red se controlan con dos opciones independientes en Ajustes, ambas desactivadas hasta que las actives. El código se limita a la carpeta del chat actual y, cuando la red está desactivada, también lo está para el código del asistente.",
+  "about.builtOn.heading": "Creado con TensorSharp",
+  "about.builtOn.body": "TensorAgent está basado en TensorSharp, un motor .NET de código abierto para ejecutar grandes modelos de lenguaje y difusión, con un backend Metal para las GPU de Apple. Es el mismo motor que utiliza TensorSharp.Server en el escritorio.",
+  "about.engine.unavailable": "Detalles del motor no disponibles: {error}"
+}

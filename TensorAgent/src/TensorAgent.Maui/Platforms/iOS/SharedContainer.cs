@@ -68,4 +68,24 @@ internal static class SharedContainer
             return string.Empty;
         }
     }
+
+    /// <summary>
+    /// Leave the user's interface-language choice (a tag, or empty for the system's) where
+    /// the share extension reads it, since the extension cannot read the app's settings.
+    /// See <see cref="TensorAgent.Sharing.Localization.ShareStrings"/>.
+    /// </summary>
+    public static void WriteLanguageChoice(string? choice)
+    {
+        try
+        {
+            NSUrl? container = NSFileManager.DefaultManager.GetContainerUrl(GroupIdentifier);
+            if (container?.Path is { Length: > 0 } root)
+                TensorAgent.Sharing.Localization.ShareStrings.WriteChoice(root, choice);
+        }
+        catch (Exception ex)
+        {
+            // The extension then follows the system's language: a mismatch, not a failure.
+            Console.WriteLine("TensorAgent: could not leave the language choice for the share extension: " + ex.Message);
+        }
+    }
 }

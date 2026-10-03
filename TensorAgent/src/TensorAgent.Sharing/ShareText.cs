@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System.Text;
+using TensorAgent.Sharing.Localization;
 
 namespace TensorAgent.Sharing;
 
@@ -273,7 +274,9 @@ public static class ShareText
 
         // Two thirds from the front: the beginning of a shared thing is more often the
         // part being asked about, and this still keeps a real amount of the end.
-        int budget = maxChars - 64;               // room for the marker itself
+        // Room for the marker itself, in any language: it is never wider than it would be
+        // with the whole length in it.
+        int budget = maxChars - Math.Max(64, OmittedMarker(value.Length).Length);
         int headWanted = budget * 2 / 3;
         int tailWanted = budget - headWanted;
 
@@ -287,12 +290,17 @@ public static class ShareText
         }
 
         int omitted = tailStart - head;
-        string marker = $"\n\n[… {omitted:N0} characters omitted from the middle …]\n\n";
+        string marker = OmittedMarker(omitted);
         return new ShortenedText(
             value[..head] + marker + value[tailStart..],
             value.Length,
             omitted);
     }
+
+    /// <summary>What stands where the middle was cut out, saying how much went.</summary>
+    private static string OmittedMarker(int omitted) =>
+        "\n\n" + ShareStrings.T("share.text.omitted",
+            ("characters", omitted.ToString("N0", ShareStrings.Culture))) + "\n\n";
 
     private static int SurrogateSafeCut(string value, int cut)
     {

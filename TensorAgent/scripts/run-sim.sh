@@ -19,6 +19,12 @@
 #                   types this prompt into the composer and sends it, so the
 #                   canned /api/chat stream renders on screen without anyone
 #                   tapping the simulator (simctl cannot type into a WebView).
+#   TENSORAGENT_PICK_LANGUAGE Debug builds only: with TENSORAGENT_START_PAGE=settings,
+#                   pick this interface language (a tag such as "de", or "system") in
+#                   Settings > Language once, through the same handler a tap runs.
+#   SIM_LANGUAGES   launch with these as the system's preferred languages, most
+#                   preferred first ("ja", or "zh-Hant,en"), as a device set to them
+#                   would; the simulator's own setting is left alone.
 #   TENSORAGENT_BACKGROUND_CHECK=1  Debug builds only: ask the loaded model for a long
 #                   answer and report, one 'bgcheck' line at a time, what becomes of it
 #                   when the app is sent to the background and brought back. Pair it
@@ -85,9 +91,15 @@ fi
 # TENSORAGENT_DOWNLOAD_SECONDS. Both are mostly for a physical device, where leaving
 # the app is the only way to exercise the background-task assertion and the GPU rule.
 for VAR in TENSORAGENT_BACKGROUND_CHECK TENSORAGENT_BACKGROUND_PROMPT TENSORAGENT_BACKGROUND_TOKENS \
-           TENSORAGENT_DOWNLOAD TENSORAGENT_DOWNLOAD_SECONDS; do
+           TENSORAGENT_DOWNLOAD TENSORAGENT_DOWNLOAD_SECONDS TENSORAGENT_PICK_LANGUAGE; do
     if [[ -n "${!VAR:-}" ]]; then
         export "SIMCTL_CHILD_${VAR}=${!VAR}"
     fi
 done
-exec xcrun simctl launch --console --terminate-running-process "${SIM_UDID}" "${BUNDLE_ID}"
+# -AppleLanguages in the arguments is how a launch overrides the preferred languages
+# (NSLocale.PreferredLanguages), the same as the scheme option in Xcode.
+LAUNCH_ARGS=()
+if [[ -n "${SIM_LANGUAGES:-}" ]]; then
+    LAUNCH_ARGS=(-AppleLanguages "(${SIM_LANGUAGES})")
+fi
+exec xcrun simctl launch --console --terminate-running-process "${SIM_UDID}" "${BUNDLE_ID}" ${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}

@@ -319,6 +319,21 @@ default"), Skills is a ☰ menu item beside Chats and Models, and the dictation 
 appears only in voice mode. Each was a permanent control for something decided rarely,
 on the one row a phone composer has.
 
+**In the user's language.** The interface (the chat page, the native screens, the
+messages the host sends and the share extension) is in English, Simplified Chinese,
+Traditional Chinese, Japanese, Korean, Spanish, French and German. A first launch uses
+the first of the system's preferred languages that the app has, or English if it has none
+of them. Settings > Language changes it at once, without a restart. The choice is saved
+(`uiLanguage` in `settings.json`) and used from then on, and "System" goes back to
+following the system. The model is not told: it answers in whatever language you write
+to it; system prompts, tool descriptions and tool results stay English. Share presets
+and their draft messages use the interface language. The chat retains unsent text,
+attachments and saved image selections while refreshing its language; an upload or a
+send awaiting acceptance settles before that refresh.
+iOS and macOS show their own texts for the app, such as the permission prompts and the
+share sheet's "Ask TensorAgent", in the language the system picks for the app, not the
+in-app choice. See [Languages](#languages).
+
 **The answer keeps being written while you are somewhere else in the app.** A
 generation belongs to the app, not to the HTTP request that asked for it
 (`ChatTurnManager`). This is not a refinement: iOS suspends a WKWebView's content
@@ -550,6 +565,24 @@ TensorAgent/scripts/verify-share-rule.sh     # check the share extension's activ
 TensorAgent/scripts/bench-spec-device.sh     # plain vs speculative decoding on the phone
 ```
 
+`dotnet build TensorSharp.slnx` from the repository root builds the app as well. Once
+the rest of the solution has built, `Directory.Solution.targets` builds the Mac app and,
+on Apple silicon, the simulator app in a separate `dotnet build`, as `build-mac.sh` and
+`build-sim.sh` do (on Windows, the Windows app, as `build-windows.ps1` does). The
+simulator app is built for the simulator the SDK picks rather than `build-sim.sh`'s
+explicit RuntimeIdentifier; it and its share extension are ad-hoc signed, where
+`build-sim.sh`'s extension takes the Mac's team profile if one is installed. On a Mac,
+the app build and its workload check use `DOTNET_ROOT/dotnet` when available, then
+`~/.dotnet/dotnet`, matching the scripts. Otherwise they use the solution's SDK. This
+lets the app use Xcode-compatible workloads even when the system SDK has older ones.
+`-p:TensorAgentDotnet=/path/to/dotnet` selects another SDK explicitly; its architecture
+must match the SDK running the solution. The selected SDK needs the app workloads
+and must support the installed Xcode (for Xcode 27.0, workload set 10.0.401.1 supplies
+the matching Apple SDKs). The simulator app also needs the files above. A missing workload
+skips the app and a missing file skips that head, each with a warning; any other failure
+fails the solution build. `-p:TensorSharpSkipTensorAgentApp=true` leaves the app out.
+Running, deploying and verifying still go through the scripts.
+
 `deploy-device.sh` selects the only connected physical iPhone, an installed
 `Apple Development` identity, and a compatible provisioning profile. If more
 than one phone or identity is available, set `DEVICE_ID` or `CODESIGN_KEY`;
@@ -621,6 +654,10 @@ passes it too, and besides `SKIP_SIGNING` reads, among others listed in its head
 csproj: it decides whether `TensorSharp.Models` builds its `net10.0-ios` and
 `net10.0-maccatalyst` slices at all, and restore resolves a referenced project's
 target frameworks before a `ProjectReference`'s `AdditionalProperties` are applied.
+That restore goes to `obj/<host>/apple/` (`Directory.Build.props`), apart from the
+desktop build's, so the two do not keep rewriting each other's `project.assets.json`
+and recompiling `TensorSharp.Models`. Leave the property off and the referenced projects
+fail with NETSDK1004, or quietly use the restore of an earlier build.
 
 Release device builds keep the engine. It is linked statically and reached through
 `dlsym`, and the Release build's strip step keeps only the symbols on its list, so
@@ -669,8 +706,10 @@ included, stays on `DeviceClass.Phone` unless it asks.
 
 ### On a Mac
 
-The Mac head needs the `maui-maccatalyst` workload in the same user-local SDK
-(`dotnet workload install maui-maccatalyst`), CMake and the Xcode command-line tools.
+The Mac head needs the `maui-maccatalyst` workload in the same user-local SDK, and
+`maui-ios` beside it, because the project restores both Apple target frameworks
+(`dotnet workload install maui-maccatalyst maui-ios`), plus CMake and the Xcode
+command-line tools.
 Measured here with workload set 10.0.401.1 (MAUI 10.0.110, Mac Catalyst SDK 27.0.10722)
 and Xcode 27.0. Then:
 
@@ -1004,10 +1043,12 @@ TensorAgent/
     Sandbox/        ExecutionPolicy and ConfinedPaths, shared by all three runtimes
     Python/         embedded CPython and the wheel installer
     JavaScript/     JavaScriptCore over its C API, with Node-shaped globals
-    WebUi/          the script appended to the app's own page
+    WebUi/          the script appended to the app's own page, and its strings runtime (i18n.js)
+    Localization/   the interface's string tables, one folder per language, and Loc
     Sharing/        durable-inbox import, bounded composer handoff, ACK lifecycle
   src/TensorAgent.Sharing/
-                    dependency-free envelope format and prompt composition contract
+                    dependency-free envelope format and prompt composition contract;
+                    the languages, the string engine and the share extension's tables
   src/TensorAgent.ShareExtension/
                     iOS share sheet, NSItemProvider readers, Safari preprocessing
   src/TensorAgent.Maui/
@@ -1364,11 +1405,84 @@ Providers fail individually and often; that is designed for rather than hidden. 
 challenge page is detected and refused by name rather than parsed, because the
 alternative is reporting an engine's own navigation as the user's sources.
 
+## Languages
+
+There are eight: `en`, `zh-Hans`, `zh-Hant`, `ja`, `ko`, `es`, `fr` and `de`
+(`UiLanguages.Supported` in TensorAgent.Sharing). A system language tag maps to one of
+them by its language subtag. Chinese is mapped by script and region: `zh-Hant`, `zh-TW`,
+`zh-HK`, `zh-MO` and Cantonese map to Traditional Chinese, and any other Chinese tag maps
+to Simplified.
+
+| Text | Where it is |
+| --- | --- |
+| Native screens and the host's messages | `src/TensorAgent.Core/Localization/<tag>/<area>.json`, read with `Loc.T` and `Loc.Plural` |
+| The chat page | The same tables, served as `/i18n.js?lang=<tag>`. The markup carries `data-i18n`, `data-i18n-placeholder`, `data-i18n-title` and `data-i18n-aria-label`; the script calls `t()` and `tn()` |
+| The share extension, and the drafts the app composes from what was shared | `src/TensorAgent.Sharing/Localization/<tag>/share.json`, read with `ShareStrings` |
+| Permission prompts | `src/TensorAgent.Maui/Platforms/{iOS,MacCatalyst}/Resources/<tag>.lproj/InfoPlist.strings` (the two files are identical) |
+| The share extension's name in the share sheet | `src/TensorAgent.ShareExtension/Resources/<tag>.lproj/InfoPlist.strings` |
+
+How the tables work:
+
+- A table is a flat JSON object, and a key's first segment is its file's name
+  (`settings.sandbox.runCode.title` is in `settings.json`). A key a language lacks falls
+  back to English.
+- Placeholders are named (`{model}`, `{count}`).
+- Counted text has `.one` and `.other` keys, chosen by each language's plural rule
+  (`StringCatalog.PluralCategory`, mirrored in `WebUi/i18n.js`).
+- Numbers and dates the interface formats itself use `Loc.Culture`, which is never set as
+  the thread's culture.
+
+The share extension cannot read the app's settings. So the app writes the choice to
+`ui-language.txt` at the root of the App Group container, and the extension resolves it
+against the same system languages.
+
+Some text stays English whatever the user picks:
+
+- the logs;
+- everything the model reads: system prompts, tool descriptions and results, and refusals
+  it is meant to act on;
+- text the page compares with the model's or a tool's output;
+- protocol values.
+
+**Adding a string.**
+
+1. Add the key to the English table, in the order the text appears on screen.
+2. Use it from the code as a literal: `Loc.T("area.key")`, `t('area.key')` or
+   `data-i18n="area.key"`.
+3. Add it to every other language.
+
+**Adding a language.**
+
+1. Add it to `UiLanguages.Supported`. Extend `Match` too if its tags need more than the
+   first subtag.
+2. Give it a plural rule in `StringCatalog.PluralCategory` and in `i18n.js`.
+3. Write every table and the three `InfoPlist.strings` files.
+4. Add the tag to `CFBundleLocalizations` in the three `Info.plist` files.
+
+`LocalizationTests` fails, naming each gap, until all of that agrees. It checks that:
+
+- every language has every English key, with the same placeholders;
+- every key the code asks for exists, and every key is asked for by some code;
+- text the page repaints, and a menu row and the screen it opens, read the same;
+- the system's files and the bundles' language lists match the tables;
+- the running host follows the system on first launch, keeps each explicit choice after
+  a restart, and follows the system again after choosing "System";
+- refreshing the chat keeps unsent drafts and waits for a shared send's acceptance;
+- page string responses keep their language and text consistent during concurrent switches.
+
+For simulator checks of system detection, the Settings picker and relaunch persistence,
+use `python3 ../eng/validation/verify-tensoragent-languages.py --help` from this directory.
+The tool creates an isolated simulator and keeps logs and screenshots in ignored
+`docs/validation/`; it does not run model inference or validate a physical device.
+
 ## Tests
 
 ```
 dotnet test TensorAgent/tests/TensorAgent.Tests/TensorAgent.Tests.csproj
 ```
+
+The project is part of `TensorSharp.slnx`, so `dotnet test TensorSharp.slnx` runs it
+together with `InferenceWeb.Tests`.
 
 Hermetic by default. These groups need something the machine may not have and say
 so rather than passing silently:

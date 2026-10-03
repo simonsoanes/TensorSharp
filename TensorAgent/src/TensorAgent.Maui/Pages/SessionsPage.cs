@@ -10,6 +10,7 @@
 
 using System.Collections.ObjectModel;
 using TensorAgent.Core.Hosting;
+using TensorAgent.Core.Localization;
 using TensorAgent.Core.Sessions;
 using TensorAgent.Maui.Hosting;
 
@@ -45,8 +46,27 @@ public sealed class SessionsPage : ContentPage
     {
         _app = host.App;
         _chat = chat;
-        Title = "Chats";
         BackgroundColor = Theme.Background;
+        Build();
+
+        // A new language rebuilds the screen, cells and all; the rows' date and count lines
+        // are formatted again as the new list binds them.
+        Loc.Changed += () => Dispatcher.Dispatch(() =>
+        {
+            try
+            {
+                Build();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("TensorAgent: the chats list failed to repaint in the new language: " + ex);
+            }
+        });
+    }
+
+    private void Build()
+    {
+        Title = Loc.T("sessions.title");
 
         var list = new CollectionView
         {
@@ -58,7 +78,7 @@ public sealed class SessionsPage : ContentPage
 
         var newChat = new Button
         {
-            Text = "New chat",
+            Text = Loc.T("sessions.newChat"),
             BackgroundColor = Theme.Accent,
             TextColor = Colors.White,
             CornerRadius = 10,
@@ -117,7 +137,7 @@ public sealed class SessionsPage : ContentPage
         // deliberate acts the dialog was standing in for.
         var remove = new SwipeItem
         {
-            Text = "Delete",
+            Text = Loc.T("sessions.row.delete"),
             BackgroundColor = Theme.Danger,
             // Through the command and a bound parameter rather than off the item's own
             // BindingContext: a swipe item is not in the visual tree of the cell it
@@ -173,9 +193,17 @@ public sealed class SessionsPage : ContentPage
         {
             if (value is not ConversationSummary summary)
                 return string.Empty;
-            string when = summary.UpdatedAt.ToLocalTime().ToString("MMM d, HH:mm");
-            string count = summary.MessageCount == 1 ? "1 message" : $"{summary.MessageCount} messages";
+            string when = When(summary.UpdatedAt.ToLocalTime());
+            string count = Loc.Plural("sessions.row.messages", summary.MessageCount);
             return summary.ModelId is { Length: > 0 } model ? $"{when} · {count} · {model}" : $"{when} · {count}";
+        }
+
+        /// <summary>The date in the language's own pattern; a pattern a translation got wrong
+        /// falls back to the English one rather than taking the list down.</summary>
+        private static string When(DateTimeOffset local)
+        {
+            try { return local.ToString(Loc.T("sessions.row.datePattern"), Loc.Culture); }
+            catch (FormatException) { return local.ToString("MMM d, HH:mm", Loc.Culture); }
         }
 
         public object ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture)

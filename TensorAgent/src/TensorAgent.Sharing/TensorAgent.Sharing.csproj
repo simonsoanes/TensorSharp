@@ -34,4 +34,11 @@
     <InternalsVisibleTo Include="TensorAgent.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The share extension's strings, one directory per language (Localization/<tag>/share.json),
+         read by StringCatalog under "TensorAgent.Sharing.Localization.<tag>/". -->
+    <EmbeddedResource Include="Localization\**\*.json"
+                      LogicalName="TensorAgent.Sharing.Localization.%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
 </Project>

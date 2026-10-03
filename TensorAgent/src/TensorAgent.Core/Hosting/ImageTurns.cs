@@ -10,6 +10,7 @@
 
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using TensorAgent.Core.Localization;
 using TensorSharp.Chat;
 using TensorSharp.Runtime;
 
@@ -108,7 +109,7 @@ public static class ImageTurns
             yield return new
             {
                 done = true,
-                error = "Describe the picture you want, or attach a photo and say how to change it.",
+                error = Loc.T("host.image.describe"),
                 sessionId,
             };
             yield break;

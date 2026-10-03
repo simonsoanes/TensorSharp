@@ -55,9 +55,11 @@ public sealed class SettingsPageApplyTests
 
         // Every control the page builds is one of the two shapes above. A handler written
         // any other way (a differently named local, a block that saves and returns) would
-        // otherwise fall into neither set and let a switch that never applies pass.
-        int controls = Regex.Matches(page, @"_body\.Add\((?:Switch|Ladder|Choice|Stepper)\(").Count;
+        // otherwise fall into neither set and let a switch that never applies pass. The
+        // language row is a control of its own (a picker), and applies like the rest.
+        int controls = Regex.Matches(page, @"_body\.Add\((?:Switch|Ladder|Choice|Stepper|LanguagePicker)\(").Count;
         Assert.True(controls > 0, "the page no longer builds its controls through Switch/Ladder/Choice/Stepper");
+        Assert.Contains(nameof(AppSettings.UiLanguage), applied);
         Assert.Equal(controls, applied.Count + savedOnly.Count);
         // And nothing saves the settings except Apply itself and the read-when-used handlers.
         int saves = Regex.Matches(page, @"_app\.Settings\.Save\(").Count;
