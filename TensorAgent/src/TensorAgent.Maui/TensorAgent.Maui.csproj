@@ -192,7 +192,8 @@
     <!-- The same page beside the Windows executable. -->
     <Content Include="wwwroot/**/*"
              Link="webui/%(RecursiveDir)%(Filename)%(Extension)"
-             CopyToOutputDirectory="PreserveNewest" />
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TensorAgentPlatform)' == 'ios'">
@@ -308,7 +309,8 @@
     <Content Include="../../skills/**/*"
              Exclude="../../skills/verdicts.json;../../skills/**/__pycache__/**/*;../../skills/**/node_modules/**/*"
              Link="skills/%(RecursiveDir)%(Filename)%(Extension)"
-             CopyToOutputDirectory="PreserveNewest" />
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- The desktop engine: the same GgmlOps library the desktop hosts load, built by the
