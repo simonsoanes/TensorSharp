@@ -509,37 +509,35 @@ internal sealed class ManagedEmbeddingEncoder : IDisposable
         });
     }
 
-    private unsafe void RotateQkv(int count, int[] positions)
+    private void RotateQkv(int count, int[] positions)
     {
         // Apply RoPE to Q and K portions of _qkv in-place.
         // _qkv layout: [token * 3 * _dim] where [0:_dim]=Q, [_dim:2*_dim]=K, [2*_dim:3*_dim]=V.
         // Each head's Q/K has _head dimensions; RoPE rotates pairs (2j, 2j+1) by pos * theta_base^(-2j/_head).
         int halfHead = _head / 2;
-        fixed (float* qkv = _qkv)
+        float[] qkv = _qkv;
+        ForRows(count, row =>
         {
-            ForRows(count, row =>
+            int pos = positions[row];
+            var qRow = qkv.AsSpan(row * 3 * _dim, _dim);
+            var kRow = qkv.AsSpan(row * 3 * _dim + _dim, _dim);
+            for (int h = 0; h < _heads; ++h)
             {
-                int pos = positions[row];
-                float* qRow = qkv + (long)row * 3 * _dim;
-                float* kRow = qRow + _dim;
-                for (int h = 0; h < _heads; ++h)
+                var qHead = qRow.Slice(h * _head, _head);
+                var kHead = kRow.Slice(h * _head, _head);
+                for (int j = 0; j < halfHead; ++j)
                 {
-                    float* qHead = qRow + h * _head;
-                    float* kHead = kRow + h * _head;
-                    for (int j = 0; j < halfHead; ++j)
-                    {
-                        float theta = pos * MathF.Pow(1000.0f, -2.0f * j / _head);
-                        float cos = MathF.Cos(theta), sin = MathF.Sin(theta);
-                        float q0 = qHead[2 * j], q1 = qHead[2 * j + 1];
-                        qHead[2 * j] = q0 * cos - q1 * sin;
-                        qHead[2 * j + 1] = q1 * cos + q0 * sin;
-                        float k0 = kHead[2 * j], k1 = kHead[2 * j + 1];
-                        kHead[2 * j] = k0 * cos - k1 * sin;
-                        kHead[2 * j + 1] = k1 * cos + k0 * sin;
-                    }
+                    float theta = pos * MathF.Pow(1000.0f, -2.0f * j / _head);
+                    float cos = MathF.Cos(theta), sin = MathF.Sin(theta);
+                    float q0 = qHead[2 * j], q1 = qHead[2 * j + 1];
+                    qHead[2 * j] = q0 * cos - q1 * sin;
+                    qHead[2 * j + 1] = q1 * cos + q0 * sin;
+                    float k0 = kHead[2 * j], k1 = kHead[2 * j + 1];
+                    kHead[2 * j] = k0 * cos - k1 * sin;
+                    kHead[2 * j + 1] = k1 * cos + k0 * sin;
                 }
-            });
-        }
+            }
+        });
     }
 
     private void ForRows(int rows, Action<int> action)
