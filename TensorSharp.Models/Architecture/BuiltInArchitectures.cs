@@ -36,6 +36,7 @@ namespace TensorSharp.Models.Architecture
             ModelArchitectureRegistry.Register(NemotronArchitecture.Descriptor);
             ModelArchitectureRegistry.Register(Mistral3Architecture.Descriptor);
             ModelArchitectureRegistry.Register(HunyuanDenseArchitecture.Descriptor);
+            ModelArchitectureRegistry.Register(Lfm3Architecture.Descriptor);
             ModelArchitectureRegistry.Register(MuseGlimmerArchitecture.Descriptor);
             ModelArchitectureRegistry.Register(MuseSparkArchitecture.Descriptor);
             ModelArchitectureRegistry.Register(DeepSeek4Architecture.Descriptor);

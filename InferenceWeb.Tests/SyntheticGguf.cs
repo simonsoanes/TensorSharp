@@ -300,6 +300,16 @@ internal static class SyntheticGguf
         }
     }
 
+    public sealed class BoolArr : Kv
+    {
+        public IReadOnlyList<bool> V;
+        public override void Write(BinaryWriter w)
+        {
+            w.Write(9u); w.Write(7u); w.Write((ulong)V.Count);
+            foreach (bool v in V) w.Write(v);
+        }
+    }
+
     private static void WriteStr(BinaryWriter w, string s)
     {
         byte[] b = Encoding.UTF8.GetBytes(s);

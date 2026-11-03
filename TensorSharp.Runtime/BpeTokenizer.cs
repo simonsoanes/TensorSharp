@@ -175,6 +175,11 @@ namespace TensorSharp.Runtime
                 // trained on and it quoted it back as "INV-4472".
                 "glm4" or "chatglm-bpe" =>
                     @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+",
+                // Liquid LFM2/LFM3: llama.cpp selects LLAMA_VOCAB_PRE_TYPE_LLAMA3 for "lfm2"
+                // (the same regex as the GLM arm above). The default below splits every
+                // digit, so "2024" reached the model as four tokens instead of "202","4".
+                "lfm2" =>
+                    @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+",
                 "tekken" =>
                     @"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+|" +
                     @"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*|" +

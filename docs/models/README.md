@@ -38,6 +38,7 @@ Media in the input column is content the model receives; the output column disti
 | [Nemotron-H / Omni](nemotron.md) | Text; image on Omni; conditional audio | Text | Conditional: audio needs a Parakeet companion absent from public GGUFs. Speculation is unsupported. |
 | [Mistral 3](mistral3.md) | Text, image | Text | Unsupported: explicit thinking mode and tools. Check the named checkpoint/backend coverage. |
 | [Hunyuan Dense](hunyuan-dense.md) | Text | Text | Implemented: single-device text path; tools, tensor parallelism and layer split are unsupported. |
+| [LFM3](lfm3.md) | Text (LFM3-VL's vision tower is not loaded) | Text | Experimental: validated on synthetic checkpoints only (CPU, GGML CPU, in-process TP); no real LFM3 GGUF run yet. Tensor parallelism supported. |
 | [GLM 5.x](glm.md) | Text; image only on 5.3-Flash | Text | Conditional: 5.2/5.3 are text-only. NextN excludes active tensor parallelism; the CPU reference has numerical limits. |
 | [DeepSeek V4 Flash](deepseek4.md) | Text | Text | Conditional: check memory and placement; optional DSpark speculation requires a matching drafter. |
 | [DeepSeek V4.1 Flash / 1017](deepseek41.md) | Text; conditional image/video | Text | Experimental: routed-MoE TP/DSpark. Pure-C# CPU coverage is fixture-only; default 1017 YOCO prefill is approximate. |
