@@ -109,6 +109,7 @@ namespace TensorSharp.Models
             while (newCapacity < requiredSeqLen)
                 newCapacity = Math.Min(_maxContextLength, newCapacity * 2);
 
+            EnsureHostRows(_cacheSeqLen);
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 if (_tpKvCacheK[l] == null) continue;
@@ -125,7 +126,9 @@ namespace TensorSharp.Models
 
         private void ResetTpCaches()
         {
-            if (_tpKvCacheK == null)
+            // As on one device: the rows are never read past _cacheSeqLen, and clearing
+            // them would drop the device copies the native graphs are built on.
+            if (_tpKvCacheK == null || _nativeForward)
                 return;
             for (int l = 0; l < Config.NumLayers; l++)
             {
@@ -155,6 +158,12 @@ namespace TensorSharp.Models
         private float[] ForwardTP(int[] tokens)
         {
             _forwardSw.Start();
+            if (TryForwardNative(tokens, out float[] nativeLogits))
+            {
+                _forwardSw.Stop();
+                return _logitsBuffer = nativeLogits;
+            }
+
             int seqLen = tokens.Length;
             int startPos = _cacheSeqLen;
             EnsureTpCacheCapacity(startPos + seqLen);
@@ -162,7 +171,14 @@ namespace TensorSharp.Models
             long t1 = Stopwatch.GetTimestamp();
             Tensor embedded = Embedding(tokens);
             _embTicks += Stopwatch.GetTimestamp() - t1;
-            Tensor[] hidden = BroadcastTensorToAllRanks(embedded);
+            // Each rank adds to its own residual stream, so each needs its own buffer. On
+            // GGML BroadcastTensorToAllRanks hands the ranks above 0 the source tensor.
+            var hidden = new Tensor[TpDegree];
+            for (int r = 0; r < hidden.Length; r++)
+            {
+                hidden[r] = new Tensor(_tpGroup.GetAllocator(r), embedded.ElementType, embedded.Sizes);
+                Ops.Copy(hidden[r], embedded);
+            }
             embedded.Dispose();
 
             for (int layer = 0; layer < Config.NumLayers; layer++)

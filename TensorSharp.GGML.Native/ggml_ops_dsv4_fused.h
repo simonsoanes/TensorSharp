@@ -78,6 +78,10 @@ enum tsg_dsv4_fused_kind : int32_t
     // TSG_ATTN_VISION_F32 on tensor cores: F16 Q/K/V operands, F32 scores,
     // softmax and output. Same inputs and output layout.
     TSG_ATTN_VISION_MMA         = 28,
+    // LFM3 (ggml_ops_lfm3.h). CUDA runs desc.cuda_compute; no CPU backend runs them.
+    TSG_LFM3_SHORTCONV          = 29,
+    TSG_LFM3_ATTN_PREP          = 30,
+    TSG_LFM3_ATTN               = 31,
 };
 
 #define TSG_DSV4_FUSED_MAGIC 0x5453445356344655ull  // "TSDSV4FU"
@@ -95,7 +99,7 @@ struct tsg_dsv4_fused_desc
     void *   object = nullptr;
     void   (*host_compute)(void * object, struct ggml_tensor * dst) = nullptr;
     void   (*device_launch)(void * object, struct ggml_tensor * dst, void * cuda_stream, int device) = nullptr;
-    // TSG_MSA_ATTENTION only: launches the node on the paired ggml-cuda
+    // TSG_MSA_ATTENTION and the TSG_LFM3_ kinds: launches the node on the paired ggml-cuda
     // backend's stream, with the workspace in the node's own tail. Kept a
     // pointer for the same reason as the TP hooks: no link dependency from
     // this backend.

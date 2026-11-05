@@ -3244,6 +3244,7 @@ extern "C" void TSGgml_Gemma4ResetDecodeCache();
 extern "C" void TSGgml_Qwen35ReleaseVerifyTpGraphs();
 extern "C" void TSGgml_Qwen35ReleaseVerifyGraphsPreserveState();
 extern "C" void TSGgml_Qwen35ResetDecodeCache();
+extern "C" void TSGgml_Lfm3ResetDecodeCache();
 extern "C" void TSGgml_Qwen35ResetVerifyCache();
 extern "C" void TSGgml_Qwen35ResetVerifyCacheForHostPointer(const void* host_ptr);
 extern "C" void TSGgml_Gemma4ResetBatchedDecodeCache();
@@ -3287,6 +3288,7 @@ TSG_EXPORT void TSGgml_ClearHostBufferCache()
     // their captured graphs pointing at freed device memory.
     TSGgml_WanResetForwardCache();
     TSGgml_Qwen35ResetDecodeCache();
+    TSGgml_Lfm3ResetDecodeCache();
     // The same holds for the persistent graphs TSGgml_InvalidateHostBuffer drops when
     // it frees ONE device copy; this wipe frees all of them. They used to survive a
     // model unload until TSGgml_Shutdown. Their keys are raw host addresses (DFlash:
@@ -3390,6 +3392,7 @@ TSG_EXPORT void TSGgml_Shutdown()
     // pinned staging buffers that reference every rank's backend.
     tp_comm_free();
     TSGgml_Qwen35ResetDecodeCache();
+    TSGgml_Lfm3ResetDecodeCache();
     TSGgml_Qwen35ReleaseVerifyTpGraphs();
     forget_cache_keys();
 
@@ -3838,6 +3841,7 @@ TSG_EXPORT void TSGgml_InvalidateHostBuffer(void* ptr)
     TSGgml_Qwen35ArenaResetBatchedDecodeCache();
     TSGgml_Qwen4ExpArenaResetBatchedDecodeCache();
     TSGgml_Qwen35ResetDecodeCache();
+    TSGgml_Lfm3ResetDecodeCache();
     TSGgml_Qwen35ResetVerifyCacheForHostPointer(ptr);
     // Muse-Glimmer's persistent decode graphs bind the KV device copies the same
     // way. Its C# side resets them around its own grow/truncate/inject, but the

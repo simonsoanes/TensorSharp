@@ -1475,7 +1475,72 @@ internal enum GgmlIndexReductionOp
     /// type of its own, so reading it never runs GgmlNative's static constructor (whose early
     /// tunables may P/Invoke, i.e. load the very library the caller is asking about).
     /// </summary>
-    internal static class GgmlNativeLibraryState
+    // LFM3's whole-model forward (TSGgml_Lfm3Forward, ggml_ops_lfm3.cpp). Field order and
+// types MUST match the native TSGgmlLfm3Weight / TSGgmlLfm3Layer / TSGgmlLfm3Args.
+[StructLayout(LayoutKind.Sequential)]
+public struct Lfm3Weight
+{
+    public IntPtr Data;
+    public int Type;
+    public int Reserved;
+    public long Ne0;
+    public long Ne1;
+    public long Bytes;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct Lfm3Layer
+{
+    public int StructBytes;
+    public int Kind; // 0 conv, 1 full attention, 2 sliding attention
+    public IntPtr AttnNorm;
+    public IntPtr FfnNorm;
+    public IntPtr PostAttnNorm; // zero without sandwich norms
+    public IntPtr PostFfnNorm;
+    public Lfm3Weight FfnGate;
+    public Lfm3Weight FfnUp;
+    public Lfm3Weight FfnDown;
+    public Lfm3Weight InProj;
+    public Lfm3Weight OutProj;
+    public IntPtr ConvTaps;
+    public IntPtr ConvState;
+    public Lfm3Weight Q;
+    public Lfm3Weight K;
+    public Lfm3Weight V;
+    public Lfm3Weight Gate;
+    public Lfm3Weight O;
+    public IntPtr QNorm;
+    public IntPtr KNorm;
+    public IntPtr KCache;
+    public IntPtr VCache;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct Lfm3Args
+{
+    public int StructBytes;
+    public int Hidden;
+    public int NumHeads;
+    public int NumKVHeads;
+    public int HeadDim;
+    public int CacheCapacity;
+    public int KvType;
+    public int ConvWidth;
+    public int Window;
+    public int RopeHalf;
+    public int Vocab;
+    public int ConvStateFloats;
+    public int ConvChannels;
+    public long CacheBytes;
+    public float Eps;
+    public float PositionScale;
+    public IntPtr FreqsFull;
+    public IntPtr FreqsSliding;
+    public IntPtr FinalNorm;
+    public Lfm3Weight LmHead;
+}
+
+internal static class GgmlNativeLibraryState
     {
         private static int s_loaded;
 
@@ -3967,6 +4032,49 @@ internal enum GgmlIndexReductionOp
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial void TSGgml_Qwen35ResetDecodeCache();
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static unsafe partial int TSGgml_Lfm3Forward(
+            ref Lfm3Args args, [In] Lfm3Layer[] layers, int numLayers,
+            float* hidden, int tokens, int startPos, float* logits);
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static unsafe partial int TSGgml_Lfm3ForwardPlan(
+            ref Lfm3Args args, [In] Lfm3Layer[] layers, int numLayers,
+            float* hidden, int tokens, int startPos, float* logits, out IntPtr plan);
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void TSGgml_Lfm3ResetDecodeCache();
+
+        public static unsafe bool Lfm3Forward(
+            ref Lfm3Args args, Lfm3Layer[] layers, float* hidden, int tokens, int startPos, float* logits, out string error)
+        {
+            if (TSGgml_Lfm3Forward(ref args, layers, layers.Length, hidden, tokens, startPos, logits) != 0)
+            {
+                error = null;
+                return true;
+            }
+            error = GetLastErrorMessage("LFM3 forward failed.");
+            return false;
+        }
+
+        public static unsafe bool Lfm3ForwardPlan(
+            ref Lfm3Args args, Lfm3Layer[] layers, float* hidden, int tokens, int startPos, float* logits,
+            out IntPtr plan, out string error)
+        {
+            if (TSGgml_Lfm3ForwardPlan(ref args, layers, layers.Length, hidden, tokens, startPos, logits, out plan) != 0)
+            {
+                error = null;
+                return true;
+            }
+            error = GetLastErrorMessage("LFM3 forward plan failed.");
+            return false;
+        }
+
+        public static void Lfm3ResetDecodeCache() => TSGgml_Lfm3ResetDecodeCache();
 
         // Qwen3.5/3.8 SLOT-STABLE ARENA token-batched decode (the GPT-OSS arena
         // design ported to the hybrid GDN + attention family; see

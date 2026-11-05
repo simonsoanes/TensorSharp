@@ -2553,6 +2553,24 @@ namespace TensorSharp.GGML
         /// GDN state is re-seeded so the next fused decode rebuilds).</summary>
         public static void Qwen35ResetDecodeCache() => GgmlNative.Qwen35ResetDecodeCache();
 
+        /// <summary>LFM3's whole-model forward (ggml_ops_lfm3.cpp): <paramref name="tokens"/>
+        /// rows of <paramref name="hidden"/> at <paramref name="startPos"/>, the last row's
+        /// logits into <paramref name="logits"/>. False with <paramref name="error"/> when
+        /// the graph did not run.</summary>
+        public static unsafe bool Lfm3Forward(
+            ref Lfm3Args args, Lfm3Layer[] layers, float* hidden, int tokens, int startPos, float* logits, out string error)
+            => GgmlNative.Lfm3Forward(ref args, layers, hidden, tokens, startPos, logits, out error);
+
+        /// <summary>The active rank's graph for this forward, unexecuted, for
+        /// <see cref="TensorParallelExecutePlans"/>. Both pointers must outlive that call;
+        /// <paramref name="logits"/> is null on a rank with no LM head.</summary>
+        public static unsafe bool Lfm3ForwardPlan(
+            ref Lfm3Args args, Lfm3Layer[] layers, float* hidden, int tokens, int startPos, float* logits,
+            out IntPtr plan, out string error)
+            => GgmlNative.Lfm3ForwardPlan(ref args, layers, hidden, tokens, startPos, logits, out plan, out error);
+
+        public static void Lfm3ResetDecodeCache() => GgmlNative.Lfm3ResetDecodeCache();
+
 
         /// <summary>Qwen3.5/3.8 slot-stable arena token-batched decode (one fused
         /// graph for N sequences; see ggml_ops_qwen35_batched_arena.cpp). Returns

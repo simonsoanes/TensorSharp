@@ -316,6 +316,7 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_qwen35_recurrent_prefill.cpp
     ggml_ops_qwen35_gdn_tp.cpp
     ggml_ops_mamba2.cpp
+    ggml_ops_lfm3.cpp
     ggml_ops_moe.cpp
     ggml_ops_host_moe_decode.cpp
     ggml_ops_host_moe_cache.cpp
@@ -362,6 +363,7 @@ if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
     list(APPEND TSG_GGMLOPS_SOURCES ggml_ops_tp_probe.cu ggml_ops_deepseek41_tp_cuda.cu)
     list(APPEND TSG_GGMLOPS_SOURCES ggml_ops_host_pin.cu)
     list(APPEND TSG_GGMLOPS_SOURCES ggml_ops_minimax_msa.cu)
+    list(APPEND TSG_GGMLOPS_SOURCES ggml_ops_lfm3.cu)
     # Wan / Qwen-Image VAE convolutions on cuDNN (see tsg_cuda_cudnn_conv.cu).
     # Optional: the VAE falls back to ggml's im2col+GEMM when cuDNN is absent.
     #

@@ -1106,7 +1106,8 @@ static enum ggml_status tsg_dsv4_backend_graph_compute(ggml_backend_t backend, g
             d->device_launch(d->object, node, (void *) stream, c->device);
             CUDA_CHECK(cudaSetDevice(c->device));
         }
-        else if (d->kind == TSG_MSA_ATTENTION)
+        else if (d->kind == TSG_MSA_ATTENTION || d->kind == TSG_LFM3_SHORTCONV ||
+                 d->kind == TSG_LFM3_ATTN_PREP || d->kind == TSG_LFM3_ATTN)
         {
             GGML_ASSERT(d->cuda_compute != nullptr);
             d->cuda_compute(node, c->cuda_backend);

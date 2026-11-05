@@ -118,6 +118,7 @@ namespace TensorSharp.Models
                 InitTpCaches(initialCacheLength, maxContextLength);
             else
                 InitCaches(initialCacheLength, maxContextLength);
+            InitNativeForward();
         }
 
         // The conv kernel is read on the host by the short-conv loop, so it is loaded as
@@ -235,7 +236,9 @@ namespace TensorSharp.Models
                         throw new InvalidDataException(
                             $"lfm3 layer {l}: shortconv.conv.weight has {kernel.ElementCount()} values, expected {hidden}x{_convWidth}.");
                     }
-                    _convWeights[l] = TensorToFloatArray(kernel);
+                    // Pinned: the native graph keys its device copy on this address.
+                    _convWeights[l] = GC.AllocateArray<float>((int)kernel.ElementCount(), pinned: true);
+                    TensorToFloatArray(kernel).CopyTo(_convWeights[l], 0);
                 }
                 else
                 {
@@ -292,13 +295,20 @@ namespace TensorSharp.Models
         private void AllocateConvState()
         {
             _convState = new float[Config.NumLayers][];
-            int perLayer = Config.HiddenSize * Math.Max(0, _convWidth - 1);
             for (int l = 0; l < Config.NumLayers; l++)
             {
+                // Pinned and padded for the native graph, which keeps a device copy keyed
+                // on this address. ConvStateSpan is the state itself.
                 if (_layerKinds[l] == LayerKind.Conv)
-                    _convState[l] = new float[perLayer];
+                    _convState[l] = GC.AllocateArray<float>(ConvStateAllocationFloats, pinned: true);
             }
         }
+
+        private int ConvStateAllocationFloats =>
+            Math.Max(Config.HiddenSize * Math.Max(0, _convWidth - 1), NativeMinStateFloats);
+
+        private Span<float> ConvStateSpan(int layer) =>
+            _convState[layer].AsSpan(0, Config.HiddenSize * Math.Max(0, _convWidth - 1));
 
         private void EnsureCacheCapacity(int requiredSeqLen)
         {
@@ -314,6 +324,7 @@ namespace TensorSharp.Models
             while (newCapacity < requiredSeqLen)
                 newCapacity = Math.Min(_maxContextLength, newCapacity * 2);
 
+            EnsureHostRows(_cacheSeqLen);
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 if (_kvCacheK[l] == null) continue;
@@ -340,6 +351,9 @@ namespace TensorSharp.Models
                     throw new InvalidOperationException("lfm3: could not move the attention cache into its larger buffer.");
                 InvalidateTensorDeviceCache(grown);
             }
+            // Also retires the native graphs built on the old cache.
+            if (_nativeForward)
+                InvalidateTensorDeviceCache(old);
             old.Dispose();
             return grown;
         }
@@ -347,19 +361,22 @@ namespace TensorSharp.Models
         protected override void ResetKVCacheCore()
         {
             _cacheSeqLen = 0;
+            _nativeHostRows = 0;
             _linearTicks = _attnTicks = _normTicks = _embTicks = _lmHeadTicks = _logitsCopyTicks = 0;
             _forwardCount = 0;
             _forwardSw.Reset();
             if (_convState != null)
             {
-                foreach (float[] state in _convState)
+                for (int l = 0; l < _convState.Length; l++)
                 {
-                    if (state != null) Array.Clear(state);
+                    if (_convState[l] == null) continue;
+                    Array.Clear(_convState[l]);
+                    UploadConvState(l);
                 }
             }
             // Positions past _cacheSeqLen are never read, so the K/V rows need no clearing;
-            // ResetCacheTensor also drops their device copies.
-            if (_kvCacheK != null)
+            // ResetCacheTensor also drops their device copies, which the native graph keeps.
+            if (_kvCacheK != null && !_nativeForward)
             {
                 for (int l = 0; l < Config.NumLayers; l++)
                 {
@@ -399,6 +416,12 @@ namespace TensorSharp.Models
                 return ForwardTP(tokens);
 
             _forwardSw.Start();
+            if (TryForwardNative(tokens, out float[] nativeLogits))
+            {
+                _forwardSw.Stop();
+                return _logitsBuffer = nativeLogits;
+            }
+
             int seqLen = tokens.Length;
             int startPos = _cacheSeqLen;
             EnsureCacheCapacity(startPos + seqLen);
@@ -856,6 +879,11 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            if (_nativeForward)
+            {
+                GgmlBasicOps.Lfm3ResetDecodeCache();
+                ReleaseNativeConvState();
+            }
             if (_kvCacheK != null)
             {
                 foreach (Tensor t in _kvCacheK) t?.Dispose();

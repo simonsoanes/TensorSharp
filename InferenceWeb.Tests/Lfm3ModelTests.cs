@@ -337,6 +337,100 @@ public sealed class Lfm3ModelTests : IDisposable
         Close(all[position], model.Forward(new[] { Prompt[position] }), 2e-3f);
     }
 
+    /// <summary>
+    /// The native CUDA forward (ggml_ops_lfm3.cu): every kernel against the float64
+    /// reference. Prefill and single tokens interleave over one device-resident cache and
+    /// conv state, past the window and the first cache capacity; a snapshot taken from the
+    /// device restores into a reset model in both block forms. Head size 64 attends through
+    /// flash attention and 16, which has no flash kernel, through the guard's explicit path.
+    /// Multi-token F32 matmuls on CUDA round at about 2e-2 here, as the per-op route does.
+    /// </summary>
+    [GgmlTheory(BackendType.GgmlCuda)]
+    [InlineData(KvCacheDtype.F32, 16)]
+    [InlineData(KvCacheDtype.F16, 16)]
+    [InlineData(KvCacheDtype.F32, 64)]
+    [InlineData(KvCacheDtype.F16, 64)]
+    public void GgmlCudaKernelsMatchTheReferenceAndRestoreASnapshot(KvCacheDtype dtype, int headDim)
+    {
+        const float tolerance = 6e-2f;
+        // Device-resident caches need a size worth caching, and the first capacity is
+        // short of this prompt so the forwards below grow it.
+        _environment.Set("TS_KV_INITIAL_TOKENS", "64");
+        KvCacheDtypeConfig.Set(dtype);
+        int[] prompt = Enumerable.Repeat(Prompt, 6).SelectMany(tokens => tokens).ToArray();
+        var (fixture, path) = Build(new Lfm3SyntheticModelBuilder { HeadDim = headDim });
+        float[][] all = fixture.ReferenceAll(prompt);
+        using var model = Assert.IsType<Lfm3Model>(ModelBase.Create(path, BackendType.GgmlCuda));
+        Assert.True(model.UsesNativeForward);
+
+        int position = 0;
+        foreach (int chunk in new[] { 3, 1, 5, 1, 1, 2, 7, 1, 50, 1 })
+        {
+            float[] logits = model.Forward(prompt[position..(position + chunk)]);
+            position += chunk;
+            Close(all[position - 1], logits, tolerance);
+        }
+        Assert.True(model.UsesNativeForward);
+
+        int blockEnd = position;
+        var full = new byte[model.ComputeKVBlockByteSize(blockEnd)];
+        Assert.True(model.TryExtractKVBlock(0, blockEnd, full));
+        Close(all[position], model.Forward(new[] { prompt[position] }), tolerance);
+        position++;
+
+        // A reset must clear the device's conv state, or this first token would see it.
+        model.ResetKVCache();
+        Close(all[0], model.Forward(prompt[..1]), tolerance);
+        model.ResetKVCache();
+
+        // Prefix (K/V only) then the rest with its state: what an engine swap does.
+        int prefix = 40;
+        var keysOnly = new byte[model.ComputeKVBlockByteSizeWithoutRecurrentState(prefix)];
+        var tail = new byte[model.ComputeKVBlockByteSize(blockEnd - prefix)];
+        using (var source = Assert.IsType<Lfm3Model>(ModelBase.Create(path, BackendType.GgmlCuda)))
+        {
+            Assert.True(source.UsesNativeForward);
+            source.Forward(prompt[..blockEnd]);
+            Assert.True(source.TryExtractKVBlock(0, prefix, keysOnly));
+            Assert.True(source.TryExtractKVBlock(prefix, blockEnd - prefix, tail));
+        }
+        Assert.True(model.TryInjectKVBlock(0, prefix, keysOnly));
+        Assert.True(model.TryInjectKVBlock(prefix, blockEnd - prefix, tail));
+        Close(all[blockEnd], model.Forward(new[] { prompt[blockEnd] }), tolerance);
+        Close(all[blockEnd + 1], model.Forward(prompt[(blockEnd + 1)..(blockEnd + 2)]), tolerance);
+
+        model.ResetKVCache();
+        Assert.True(model.TryInjectKVBlock(0, blockEnd, full));
+        Close(all[blockEnd], model.Forward(new[] { prompt[blockEnd] }), tolerance);
+    }
+
+    /// <summary>One token at a time everything but the matmuls is a TensorSharp kernel and
+    /// the matmuls take the exact vector path, so the short conv, the Q/K preparation and the
+    /// split-KV attention are held to the reference tightly, past the window.</summary>
+    [GgmlFact(BackendType.GgmlCuda)]
+    public void GgmlCudaDecodeKernelsAreExactToTheReference()
+    {
+        _environment.Set("TS_KV_INITIAL_TOKENS", "64");
+        int[] prompt = Enumerable.Repeat(Prompt, 3).SelectMany(tokens => tokens).ToArray();
+        var (fixture, path) = Build();
+        float[][] all = fixture.ReferenceAll(prompt);
+        using var model = Assert.IsType<Lfm3Model>(ModelBase.Create(path, BackendType.GgmlCuda));
+        Assert.True(model.UsesNativeForward);
+        for (int position = 0; position < prompt.Length; position++)
+            Close(all[position], model.Forward(new[] { prompt[position] }), 1e-4f);
+    }
+
+    /// <summary>The native forward refuses a cache it could not keep on the device, and the
+    /// per-op route carries the model instead of failing.</summary>
+    [GgmlFact(BackendType.GgmlCuda)]
+    public void GgmlCudaTooSmallACacheStaysOnThePerOpPath()
+    {
+        var (fixture, path) = Build();
+        using var model = Assert.IsType<Lfm3Model>(ModelBase.Create(path, BackendType.GgmlCuda));
+        Assert.False(model.UsesNativeForward);
+        Close(fixture.ReferenceAll(Prompt)[Prompt.Length - 1], model.Forward(Prompt), 6e-2f);
+    }
+
     /// <summary>GGML tensor parallelism over two real devices against the same backend on
     /// one: the per-rank shards resident on each GPU, and the snapshot gathered from them.</summary>
     [GgmlTheory(BackendType.GgmlCuda, Devices = 2)]
@@ -360,6 +454,42 @@ public sealed class Lfm3ModelTests : IDisposable
         Assert.True(tp.TryInjectKVBlock(0, 13, block));
         for (int position = 13; position < Prompt.Length; position++)
             Close(expected[position], tp.Forward(new[] { Prompt[position] }), 2e-3f);
+    }
+
+    /// <summary>With caches worth keeping on the device, each GPU runs the native graph over
+    /// its shard, and the result, a cache that grew and a restored snapshot all match one
+    /// device. Reduced sums round differently, so this is the multi-token tolerance.</summary>
+    [GgmlTheory(BackendType.GgmlCuda, Devices = 2)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GgmlCudaTensorParallelNativeForwardMatchesOneDevice(bool quantized)
+    {
+        const float tolerance = 6e-2f;
+        _environment.Set("TS_KV_INITIAL_TOKENS", "64");
+        int[] prompt = Enumerable.Repeat(Prompt, 6).SelectMany(tokens => tokens).ToArray();
+        var (_, path) = Build(new Lfm3SyntheticModelBuilder { HeadDim = 64, QuantizeProjections = quantized });
+        var expected = new float[prompt.Length][];
+        using (var single = Assert.IsType<Lfm3Model>(ModelBase.Create(path, BackendType.GgmlCuda)))
+        {
+            Assert.True(single.UsesNativeForward);
+            for (int position = 0; position < prompt.Length; position++)
+                expected[position] = (float[])single.Forward(new[] { prompt[position] }).Clone();
+        }
+
+        using var tp = Assert.IsType<Lfm3Model>(ModelBase.Create(path, BackendType.GgmlCuda, tpDegree: 2));
+        Assert.True(tp.UsesNativeForward);
+        Close(expected[69], tp.Forward(prompt[..70]), tolerance);
+        Close(expected[70], tp.Forward(prompt[70..71]), tolerance);
+
+        var block = new byte[tp.ComputeKVBlockByteSize(71)];
+        Assert.True(tp.TryExtractKVBlock(0, 71, block));
+        tp.ResetKVCache();
+        Close(expected[0], tp.Forward(prompt[..1]), tolerance);
+        tp.ResetKVCache();
+        Assert.True(tp.TryInjectKVBlock(0, 71, block));
+        for (int position = 71; position < prompt.Length; position++)
+            Close(expected[position], tp.Forward(new[] { prompt[position] }), tolerance);
+        Assert.True(tp.UsesNativeForward);
     }
 
     [Fact]

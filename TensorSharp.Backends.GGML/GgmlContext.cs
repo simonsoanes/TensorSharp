@@ -58,6 +58,21 @@ namespace TensorSharp.GGML
         /// through host memory, so there is nothing to AllReduce.
         /// </param>
         public GgmlContext(int[] deviceIds, GgmlBackendType backendType, bool enableCollectives)
+            : this(deviceIds, backendType, enableCollectives, loopback: false)
+        {
+        }
+
+        /// <summary>
+        /// <paramref name="degree"/> tensor-parallel ranks on device 0, reducing through host
+        /// memory, so a machine with one GPU can run the per-rank graphs, the segment schedule
+        /// and the reduction of a real group (not its device collective). Correctness only: the
+        /// ranks serialize. It stays in force for the life of the process, so run it in a
+        /// process of its own.
+        /// </summary>
+        public static GgmlContext CreateTensorParallelLoopback(GgmlBackendType backendType, int degree)
+            => new GgmlContext(new int[degree], backendType, enableCollectives: true, loopback: true);
+
+        private GgmlContext(int[] deviceIds, GgmlBackendType backendType, bool enableCollectives, bool loopback)
         {
             if (deviceIds == null || deviceIds.Length == 0)
             {
@@ -88,7 +103,12 @@ namespace TensorSharp.GGML
                 // concurrently: that decides whether ggml-cuda's graph capture
                 // (which is process-wide and breaks under concurrent CUDA calls)
                 // has to be turned off for the run.
-                if (enableCollectives)
+                if (loopback)
+                {
+                    GgmlNative.TensorParallelInitLoopback(backendType, DeviceIds.Length);
+                    HasDeviceAllReduce = false;
+                }
+                else if (enableCollectives)
                 {
                     GgmlNative.TensorParallelInit(backendType, DeviceIds, GgmlTensorParallelGroup.ParallelRanks);
                     HasDeviceAllReduce = GgmlNative.TensorParallelHasDeviceAllReduce();

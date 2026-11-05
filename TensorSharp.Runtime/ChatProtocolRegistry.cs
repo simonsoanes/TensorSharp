@@ -563,6 +563,32 @@ namespace TensorSharp.Runtime
 
             Register(new ChatProtocol
             {
+                Id = "lfm3",
+                Architectures = new[] { "lfm3" },
+                // The GGUF template renders as shipped: ChatML turns, a <tools> JSON list
+                // in the system turn, and Qwen's XML call body
+                // (<tool_call>\n<function=NAME>\n<parameter=K>...), which the ChatML
+                // parser reads. Without a parser the thinking-on reply - the prompt opens
+                // the block - streamed its reasoning and `</think>` as the answer.
+                CreateOutputParser = () => new ChatMlOutputParser(),
+                // The generation prompt ends `<think>` (thinking on) or `<think></think>`
+                // (off), with no newline either side; `<think>` and `</think>` are single
+                // tokens (124901, 124902).
+                AssistantGenerationSuffix = thinking => thinking ? "<think>" : "<think></think>",
+                // Every re-rendered past turn carries the empty block: dropped reasoning
+                // before the last user message, and a turn with no reasoning field after it.
+                EmitsEmptyThinkBlockForPastTurns = _ => true,
+                // A tool result renders from role=tool alone (consecutive results merge on
+                // tool_call_id), never from the assistant's structured calls. Splicing the
+                // round's raw tokens matters more than usual: the conv state cannot be
+                // rewound, so a re-render that diverged re-prefilled the conversation.
+                ToolCallRawSplicing = ToolCallRawSplicing.Always,
+                ThinkingGrammarActivationTrigger = "</think>",
+                ThinkingBudgetEndToken = "</think>",
+            });
+
+            Register(new ChatProtocol
+            {
                 Id = "hunyuan-dense",
                 Architectures = new[] { "hunyuan-dense" },
                 Render = r => ChatTemplate.RenderHunyuanDense(r.Messages, r.AddGenerationPrompt),

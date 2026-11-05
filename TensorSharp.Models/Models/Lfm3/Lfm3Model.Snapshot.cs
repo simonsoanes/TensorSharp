@@ -104,13 +104,15 @@ namespace TensorSharp.Models
             if (startToken < 0 || startToken + tokenCount > _cacheSeqLen) return false;
             if (IsTensorParallel) return TryExtractKVBlockTP(startToken, tokenCount, withState, destination);
 
+            EnsureHostRows(startToken + tokenCount);
             int offset = 0;
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 if (_layerKinds[l] == LayerKind.Conv)
                 {
                     if (!withState) continue;
-                    ReadOnlySpan<byte> state = MemoryMarshal.AsBytes(_convState[l].AsSpan());
+                    SyncConvState(l);
+                    ReadOnlySpan<byte> state = MemoryMarshal.AsBytes(ConvStateSpan(l));
                     state.CopyTo(destination[offset..]);
                     offset += state.Length;
                     continue;
@@ -140,8 +142,9 @@ namespace TensorSharp.Models
                 if (_layerKinds[l] == LayerKind.Conv)
                 {
                     if (!withState) continue;
-                    Span<byte> state = MemoryMarshal.AsBytes(_convState[l].AsSpan());
+                    Span<byte> state = MemoryMarshal.AsBytes(ConvStateSpan(l));
                     source.Slice(offset, state.Length).CopyTo(state);
+                    UploadConvState(l);
                     offset += state.Length;
                     continue;
                 }
@@ -152,9 +155,20 @@ namespace TensorSharp.Models
                     return false;
                 offset += rV;
                 // The rows were written through the host copy.
-                InvalidateTensorDeviceCache(_kvCacheK[l]);
-                InvalidateTensorDeviceCache(_kvCacheV[l]);
+                if (_nativeForward)
+                {
+                    UploadCacheRows(_kvCacheK[l], destToken, tokenCount);
+                    UploadCacheRows(_kvCacheV[l], destToken, tokenCount);
+                }
+                else
+                {
+                    InvalidateTensorDeviceCache(_kvCacheK[l]);
+                    InvalidateTensorDeviceCache(_kvCacheV[l]);
+                }
             }
+            // The rows just written are on the host; any before them may not be.
+            if (_nativeHostRows == destToken)
+                _nativeHostRows = destToken + tokenCount;
             _cacheSeqLen = destToken + tokenCount;
             return offset == source.Length;
         }
@@ -216,6 +230,7 @@ namespace TensorSharp.Models
         private void RunTpSnapshotExtract(int startToken, int tokenCount, bool withState, Span<byte> destination, bool isDriver)
         {
             var block = new byte[checked((int)BlockBytes(tokenCount, withState))];
+            EnsureHostRows(startToken + tokenCount);
             int channelsPerRank = Config.HiddenSize / GlobalTpDegree;
             int history = Math.Max(0, _convWidth - 1);
             int offset = 0;
@@ -224,7 +239,8 @@ namespace TensorSharp.Models
                 if (_layerKinds[l] == LayerKind.Conv)
                 {
                     if (!withState) continue;
-                    ReadOnlySpan<byte> state = MemoryMarshal.AsBytes(_convState[l].AsSpan());
+                    SyncConvState(l);
+                    ReadOnlySpan<byte> state = MemoryMarshal.AsBytes(ConvStateSpan(l));
                     int perRank = channelsPerRank * history * sizeof(float);
                     for (int r = 0; r < TpDegree; r++)
                     {
@@ -278,8 +294,9 @@ namespace TensorSharp.Models
                 if (_layerKinds[l] == LayerKind.Conv)
                 {
                     if (!withState) continue;
-                    Span<byte> state = MemoryMarshal.AsBytes(_convState[l].AsSpan());
+                    Span<byte> state = MemoryMarshal.AsBytes(ConvStateSpan(l));
                     block.Slice(offset, state.Length).CopyTo(state);
+                    UploadConvState(l);
                     offset += state.Length;
                     continue;
                 }
@@ -292,13 +309,19 @@ namespace TensorSharp.Models
                         if (!CopyCacheRowsIn(shards[r], destToken, tokenCount, block.Slice(at, perRank), out _))
                             throw new InvalidOperationException(
                                 $"lfm3 TP snapshot: layer {l} rank {r} cannot hold rows {destToken}..{destToken + tokenCount}.");
-                        InvalidateTensorDeviceCache(shards[r]);
+                        // The rows were written through the host copy.
+                        if (_nativeForward)
+                            UploadCacheRows(shards[r], destToken, tokenCount);
+                        else
+                            InvalidateTensorDeviceCache(shards[r]);
                     }
                     offset += perRank * GlobalTpDegree;
                 }
             }
             if (offset != length)
                 throw new InvalidOperationException($"lfm3 TP snapshot read {offset} of {length} bytes.");
+            if (_nativeHostRows == destToken)
+                _nativeHostRows = destToken + tokenCount;
             _cacheSeqLen = destToken + tokenCount;
         }
     }
